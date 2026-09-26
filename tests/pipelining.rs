@@ -6,8 +6,10 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread::sleep;
+use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
+
+use bytes::{BufMut, BytesMut};
 
 const ADDR: &str = "127.0.0.1:6379";
 
@@ -36,8 +38,8 @@ impl Server {
         }
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("failed to spawn the server binary");
 
@@ -193,7 +195,6 @@ fn responds_to_echo_world() {
     let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
     c1.write_all(ECHO).expect("failed to write");
     let got = read_at_least(&mut c1, 8, Duration::from_secs(2));
-
     assert_eq!(got, b"$5\r\nworld\r\n");
 }
 
@@ -237,4 +238,263 @@ fn empty_command_combines_normal_returns_ok() {
     // no response
     let got = read_at_least(&mut c1, 7, Duration::from_secs(2));
     assert_eq!(got, b"+PONG\r\n");
+}
+
+#[test]
+fn set_key_value_ok_then_get() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    let mut command = BytesMut::new();
+    generate_set_command("hello".as_bytes(), "world".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    let got = read_at_least(&mut c1, 5, Duration::from_secs(2));
+    assert_eq!(got, b"+OK\r\n");
+
+    command.clear();
+    generate_get_command("hello".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    let got = read_at_least(&mut c1, 11, Duration::from_secs(2));
+    assert_eq!(got, b"$5\r\nworld\r\n");
+}
+
+/// `GET` on a key that was never set must return the RESP null bulk string,
+/// exactly `$-1\r\n` -- not an empty bulk string, and not a bulk string whose
+/// content happens to be the literal text `$-1\r\n`.
+#[test]
+fn get_missing_key_returns_null_bulk_string() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_get_command(b"no-such-key", &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let got = read_at_least(&mut c1, 5, Duration::from_secs(2));
+    assert_eq!(got, b"$-1\r\n");
+}
+
+/// The store is shared across connections, not per-connection: a value written
+/// by one client must be readable by another.
+#[test]
+fn set_is_visible_from_another_connection() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut writer = TcpStream::connect(ADDR).expect("failed to connect writer");
+    let mut reader = TcpStream::connect(ADDR).expect("failed to connect reader");
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"shared-key", b"shared-value", &mut command);
+    writer.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut writer, 5, Duration::from_secs(2)),
+        b"+OK\r\n"
+    );
+
+    command.clear();
+    generate_get_command(b"shared-key", &mut command);
+    reader.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut reader, 19, Duration::from_secs(2)),
+        b"$12\r\nshared-value\r\n"
+    );
+}
+
+/// A second `SET` on the same key replaces the value rather than leaving the
+/// old one in place.
+#[test]
+fn set_overwrites_previous_value() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"k", b"first", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_set_command(b"k", b"second", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_get_command(b"k", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 12, Duration::from_secs(2)),
+        b"$6\r\nsecond\r\n"
+    );
+}
+
+/// Keys and values are binary-safe: an embedded CRLF in a value must survive a
+/// round trip untouched rather than being treated as a terminator.
+#[test]
+fn set_and_get_are_binary_safe() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let value: &[u8] = b"a\r\nb";
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"binary", value, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_get_command(b"binary", &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let mut expected = BytesMut::new();
+    put_bulk_string(value, &mut expected);
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected.to_vec()
+    );
+}
+
+fn generate_get_command(key:&[u8], out: &mut BytesMut) {
+    out.extend_from_slice(b"*2\r\n$3\r\nGET\r\n");
+    put_bulk_string(key, out);
+}
+
+fn generate_set_command(key:&[u8], value:&[u8], out: &mut BytesMut) {
+    out.extend_from_slice(b"*3\r\n$3\r\nSET\r\n");
+    put_bulk_string(key, out);
+    put_bulk_string(value, out);
+}
+
+fn generate_set_with_expire(key: &[u8], value:&[u8], expire:u32, out: &mut BytesMut) {
+    out.extend_from_slice(b"*5\r\n$3\r\nSET\r\n");
+    put_bulk_string(key, out);
+    put_bulk_string(value, out);
+    out.extend_from_slice(b"$2\r\nPX\r\n");
+    put_bulk_string(expire.to_string().as_bytes(), out);
+}
+
+fn put_bulk_string(val:&[u8], out: &mut BytesMut) {
+    out.put_u8(b'$');
+    out.extend_from_slice(val.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(val);
+    out.extend_from_slice(b"\r\n");
+}
+
+#[test]
+fn set_with_expire_then_get_absent() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    let mut command = BytesMut::new();
+    generate_set_with_expire("hello".as_bytes(), "world".as_bytes(), 100, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 5, Duration::from_secs(2)),
+        b"+OK\r\n"
+    );
+
+    command.clear();
+    generate_get_command("hello".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 11, Duration::from_secs(2)), 
+        b"$5\r\nworld\r\n"
+    );
+
+    thread::sleep(Duration::from_millis(200));
+    command.clear();
+    generate_get_command("hello".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 5, Duration::from_secs(2)),
+        b"$-1\r\n"
+    );
+}
+
+#[test]
+fn set_clear_previous_ttl() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    let mut command = BytesMut::new();
+    generate_set_with_expire("hello".as_bytes(), "world".as_bytes(), 100, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 5, Duration::from_secs(2)),
+        b"+OK\r\n"
+    );
+
+    command.clear();
+    generate_set_command("hello".as_bytes(), "test".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 5, Duration::from_secs(2)),
+        b"+OK\r\n"
+    );
+
+    thread::sleep(Duration::from_millis(200));
+    command.clear();
+    generate_get_command("hello".as_bytes(), &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 10, Duration::from_secs(2)),
+        b"$4\r\ntest\r\n"
+    );
+}
+
+/// A non-numeric `PX` argument is rejected with an error, and the connection
+/// stays usable afterwards.
+#[test]
+fn set_with_non_integer_px_is_an_error() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    command.extend_from_slice(b"*5\r\n$3\r\nSET\r\n");
+    put_bulk_string(b"k", &mut command);
+    put_bulk_string(b"v", &mut command);
+    command.extend_from_slice(b"$2\r\nPX\r\n");
+    put_bulk_string(b"not-a-number", &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let got = read_at_least(&mut c1, 3, Duration::from_secs(2));
+    assert!(got.starts_with(b"-ERR"), "expected an error, got {got:?}");
+
+    c1.write_all(PING).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 7, Duration::from_secs(2)),
+        b"+PONG\r\n"
+    );
+}
+
+/// Once a key expires, a later plain `SET` on the same key stores a fresh,
+/// non-expiring value.
+#[test]
+fn expired_key_can_be_set_again() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_with_expire(b"k", b"old", 100, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    thread::sleep(Duration::from_millis(200));
+
+    command.clear();
+    generate_set_command(b"k", b"new", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_get_command(b"k", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 9, Duration::from_secs(2)),
+        b"$3\r\nnew\r\n"
+    );
 }

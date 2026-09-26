@@ -32,3 +32,11 @@ Note: This section is for stages 2 and beyond.
    the first time you run it. Subsequent runs will be fast.
 1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
    output will be streamed to your terminal.
+
+# la7
+
+```
+   SET key value   →  +OK\r\n                                                                    
+   GET key         →  $<len>\r\n<value>\r\n      (存在)                                          
+                   →  $-1\r\n                     (不存在，null bulk string) 
+```
