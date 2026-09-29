@@ -27,15 +27,16 @@ struct Server(Child);
 
 impl Server {
     fn start() -> Self {
+        let addr = ADDR.parse().unwrap();
         // The tests serialise themselves with `lock_server()`, but a stale
         // server (e.g. one left over from `./your_program.sh`) can still be
         // holding the port. If it is, the child we spawn below dies with
         // `AddrInUse` while `TcpStream::connect` keeps succeeding -- so the
         // test would silently talk to the stale binary instead of the one we
         // just built. Refuse to run in that case.
-        if TcpStream::connect(ADDR).is_ok() {
-            panic!("{ADDR} is already in use -- kill the stale server before running tests");
-        }
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+           panic!("{ADDR} is already in use -- kill the stale server before running tests");
+       }
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
             .stdout(Stdio::inherit())
@@ -50,9 +51,9 @@ impl Server {
             if let Some(status) = child.try_wait().expect("failed to poll the server process") {
                 panic!("server exited before listening on {ADDR}: {status}");
             }
-            if TcpStream::connect(ADDR).is_ok() {
-                return Server(child);
-            }
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+               return Server(child);
+           }
             sleep(Duration::from_millis(20));
         }
         panic!("server never started listening on {ADDR}");
@@ -382,6 +383,15 @@ fn put_bulk_string(val:&[u8], out: &mut BytesMut) {
     out.extend_from_slice(b"\r\n");
 }
 
+fn generate_bulk_string(values:Vec<&[u8]>, out:&mut BytesMut) {
+    out.put_u8(b'*');
+    out.extend_from_slice(values.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    for val in values {
+        put_bulk_string(val, out);
+    }
+}
+
 #[test]
 fn set_with_expire_then_get_absent() {
     let _guard = lock_server();
@@ -497,4 +507,50 @@ fn expired_key_can_be_set_again() {
         read_at_least(&mut c1, 9, Duration::from_secs(2)),
         b"$3\r\nnew\r\n"
     );
+}
+
+
+#[test]
+fn appends_to_a_list_returns_length() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut out = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"fruits",b"apple"], &mut out);
+    c1.write_all(&out).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 4, Duration::from_secs(2)),
+        b":1\r\n"
+    );
+
+    out.clear();
+    generate_bulk_string(vec![b"RPUSH", b"fruits",b"banana"], &mut out);
+    c1.write_all(&out).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 4, Duration::from_secs(2)),
+        b":2\r\n"
+    );
+}
+
+/// An expired key must be treated as absent by RPUSH: the list is created
+/// fresh (length 1), not appended to the stale entry left behind by `GET`'s
+/// lazy expiration.
+#[test]
+fn rpush_after_expiry_creates_a_fresh_list() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_with_expire(b"k", b"v", 100, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    thread::sleep(Duration::from_millis(200));
+
+    command.clear();
+    generate_bulk_string(vec![b"RPUSH", b"k", b"x"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":1\r\n");
 }

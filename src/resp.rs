@@ -11,6 +11,7 @@ use bytes::{Buf, BufMut, BytesMut};
 pub enum Frame {
     SimpleString(Vec<u8>), // +PONG\r\n
     BulkString(Vec<u8>),   // $5\r\nHello\r\n
+    Int(i64),          // :42\r\n
     Array(Vec<Frame>),     // *2\r\n$4\r\nECHO\r\n$5\r\nHello\r\n
     Err(String),           // -ERR msg\r\n
     Null
@@ -24,20 +25,25 @@ impl Frame {
                 out.put_u8(b'+');
                 out.extend_from_slice(s);
                 out.extend_from_slice(b"\r\n");
-            }
+            },
             Self::BulkString(s) => {
                 out.put_u8(b'$');
                 out.extend_from_slice(s.len().to_string().as_bytes());
                 out.extend_from_slice(b"\r\n");
                 out.extend_from_slice(s);
                 out.extend_from_slice(b"\r\n");
-            }
+            },
+            Self::Int(val) => {
+                out.put_u8(b':');
+                out.extend_from_slice(val.to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+            },
             Self::Err(msg) => {
                 out.put_u8(b'-');
-                out.extend_from_slice(b"ERR ");
+                // out.extend_from_slice(b"ERR ");
                 out.extend_from_slice(msg.as_bytes());
                 out.extend_from_slice(b"\r\n");
-            }
+            },
             Self::Array(items) => {
                 out.put_u8(b'*');
                 out.extend_from_slice(items.len().to_string().as_bytes());
@@ -177,7 +183,7 @@ mod tests {
         assert_eq!(&out[..], b"$5\r\nworld\r\n");
 
         out.clear();
-        Frame::Err("boom".into()).encode(&mut out);
+        Frame::Err("ERR boom".into()).encode(&mut out);
         assert_eq!(&out[..], b"-ERR boom\r\n");
     }
 
@@ -186,6 +192,17 @@ mod tests {
         let mut out = BytesMut::new();
         Frame::Null.encode(&mut out);
         assert_eq!(&out[..], b"$-1\r\n");
+    }
+
+    #[test]
+    fn encodes_integer() {
+        let mut out = BytesMut::new();
+        Frame::Int(1).encode(&mut out);
+        assert_eq!(&out[..], b":1\r\n");
+
+        out.clear();
+        Frame::Int(-42).encode(&mut out);
+        assert_eq!(&out[..], b":-42\r\n");
     }
 
     #[test]

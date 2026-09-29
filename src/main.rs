@@ -9,9 +9,36 @@ use tokio::{
 mod resp;
 use resp::{Decoder, Frame};
 
+/// the value type in our Store
 struct Entry{
-    value: Vec<u8>,
+    value: Value,
     expires_at: Option<Instant>
+}
+
+impl Entry {
+    fn new(value:Value) -> Self {
+        Self {
+            value,
+            expires_at: None
+        }
+    }
+}
+
+enum Value {
+    String(Vec<u8>),
+    List(Vec<Vec<u8>>)
+}
+
+impl Value {
+    fn rpush(&mut self, elem: Vec<u8>) -> Option<usize> {
+        match self {
+            Value::String(_) => None,
+            Value::List(list) => {
+                list.push(elem);
+                Some(list.len())
+            }
+        }
+    }
 }
 
 /// A command handler receives the full argument list (index 0 is the command
@@ -26,8 +53,8 @@ fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
 fn cmd_echo(args: &[Frame], _store: &mut Store) -> Frame { // echo some_value
     match args.get(1) {
         Some(Frame::BulkString(arg)) => Frame::bulk(arg),
-        Some(_) => Frame::Err("echo argument is not a bulk string".into()),
-        None => Frame::Err("wrong number of arguments for 'echo' command".into()),
+        Some(_) => Frame::Err("ERR echo argument is not a bulk string".into()),
+        None => Frame::Err("ERR wrong number of arguments for 'echo' command".into()),
     }
 }
 
@@ -40,19 +67,22 @@ fn cmd_get(args: &[Frame], store: &mut Store) -> Frame { // get key
                         return Frame::Null;
                     }
                 };
-                Frame::BulkString(entry.value.clone())
+                match &entry.value {
+                    Value::String(v) => Frame::bulk(v),
+                    Value::List(_) => Frame::Err("WRONGTYPE Operation".into())
+                }
             },
             None => Frame::Null,
         },
-        Some(_) => Frame::Err("wrong format of key".into()),
-        None => Frame::Err("wrong number of arguments".into()),
+        Some(_) => Frame::Err("ERR wrong format of key".into()),
+        None => Frame::Err("ERR wrong number of arguments".into()),
     }
 }
 
 fn cmd_set(args: &[Frame], store: &mut Store) -> Frame {
     match parse_set(args) {
         Ok((key, value, expires_at)) => {
-            let value = value.to_vec();
+            let value = Value::String(value.to_vec());
             store.insert(key.to_vec(), Entry{value, expires_at});
             Frame::SimpleString(b"OK".to_vec())
         },
@@ -74,27 +104,55 @@ fn parse_millis(bytes:&[u8]) -> Option<u64> {
 // SET <key> <value> [PX <milliseconds>]
 fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), Frame> {
     if args.len() > 5 {
-        return Err(Frame::Err("syntax error".into()));
+        return Err(Frame::Err("ERR syntax error".into()));
     }
     let Some(key) = bulk(args.get(1)) else {
-        return Err(Frame::Err("wrong number of arguments for 'set'".into()));
+        return Err(Frame::Err("ERR wrong number of arguments for 'set'".into()));
     };
     let Some(value) = bulk(args.get(2)) else {
-        return Err(Frame::Err("wrong number of arguments for 'set'".into()));
+        return Err(Frame::Err("ERR wrong number of arguments for 'set'".into()));
     };
     let expires_at = match(args.get(3), args.get(4)) {
         (None, _) => None,
         (Some(Frame::BulkString(opt)), Some(Frame::BulkString(ms))) if opt.eq_ignore_ascii_case(b"PX") => {
             let Some(ms) = parse_millis(ms) else {
-                return Err(Frame::Err("value is not an integer".into()));
+                return Err(Frame::Err("ERR value is not an integer".into()));
             };
             Instant::now().checked_add(Duration::from_millis(ms))
         },
-        _ => return Err(Frame::Err("syntax error".into())),
+        _ => return Err(Frame::Err("ERR syntax error".into())),
     };
     
     Ok((key, value, expires_at))
 }
+
+/// Spec: RPUSH <key> <element> appends to a list (creating it if absent), and returns the list length as a RESP
+/// integer
+fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
+    };
+    let Some(value) = bulk(args.get(2)) else {
+        return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
+    };
+    if let Some(entry) = store.get_mut(key) {
+        // check expires_at for absent key
+        if let Some(expires_at) = entry.expires_at {
+            if expires_at <= Instant::now() {
+                // create a new list
+                *entry = Entry::new(Value::List(Vec::new()));
+            }
+        }
+        match entry.value.rpush(value.to_vec()) {
+            None => Frame::Err("WRONGTYPE Operation against a key holding the wrong kind of value".into()),
+            Some(len) => Frame::Int(len as i64)
+        }
+    } else {
+        store.insert(key.to_vec(), Entry::new(Value::List(vec![value.to_vec()])));
+        Frame::Int(1)
+    }
+}
+
 
 /// Map a command name to its handler. Adding a command is a one-line change
 /// here plus a new handler -- `execute` stays untouched (Open/Closed).
@@ -104,6 +162,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ECHO" => Some(cmd_echo),
         b"GET" => Some(cmd_get),
         b"SET" => Some(cmd_set),
+        b"RPUSH" => Some(cmd_rpush),
         _ => None,
     }
 }
@@ -115,7 +174,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
 /// means "no reply", not "unknown command".
 fn execute(req: &Frame, store: &mut Store) -> Option<Frame> {
     let Frame::Array(args) = req else {
-        return Some(Frame::Err("expected an array command".into()));
+        return Some(Frame::Err("ERR expected an array command".into()));
     };
     let Some(Frame::BulkString(name)) = args.first() else {
         return None;
@@ -123,7 +182,7 @@ fn execute(req: &Frame, store: &mut Store) -> Option<Frame> {
     Some(match lookup(name) {
         Some(handler) => handler(args, store),
         None => Frame::Err(format!(
-            "unknown command '{}'",
+            "ERR unknown command '{}'",
             String::from_utf8_lossy(name)
         )),
     })
