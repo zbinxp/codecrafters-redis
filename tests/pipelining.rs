@@ -612,3 +612,183 @@ fn rpush_on_a_string_key_returns_wrongtype() {
         expected
     );
 }
+
+#[test]
+fn lrange_returns_array() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"list_key", b"e1", b"e2", b"e3"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":3\r\n");
+
+    command.clear();
+    generate_bulk_string(vec![b"LRANGE", b"list_key", b"0",b"1"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    let got = read_at_least(&mut c1, 20, Duration::from_secs(2));
+    assert_eq!(got, b"*2\r\n$2\r\ne1\r\n$2\r\ne2\r\n");
+}
+
+#[test]
+fn lrange_missing_key_returns_null() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"list_key", b"0",b"1"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    let got = read_at_least(&mut c1, 20, Duration::from_secs(2));
+    assert_eq!(got, b"*0\r\n");
+}
+
+/// Push a known 5-element list `k` = [a, b, c, d, e] and assert the reply.
+fn push_abcde(c1: &mut TcpStream) {
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"k", b"a", b"b", b"c", b"d", b"e"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(c1, 4, Duration::from_secs(2)), b":5\r\n");
+}
+
+/// `stop` beyond the end is clamped to the last element.
+#[test]
+fn lrange_stop_beyond_length_clamps_to_last() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let expected: &[u8] = b"*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"0", b"99"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}
+
+/// A mid-range slice is inclusive of both `start` and `stop`.
+#[test]
+fn lrange_mid_range_is_inclusive() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let expected: &[u8] = b"*3\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"2", b"4"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}
+
+/// `start == stop` returns exactly one element.
+#[test]
+fn lrange_single_index_returns_one_element() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"4", b"4"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 10, Duration::from_secs(2)),
+        b"*1\r\n$1\r\ne\r\n"
+    );
+}
+
+/// `start >= len` returns an empty array (and must not panic / poison the lock).
+#[test]
+fn lrange_start_beyond_length_returns_empty() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"6", b"10"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b"*0\r\n");
+}
+
+/// `start > stop` returns an empty array.
+#[test]
+fn lrange_start_greater_than_stop_returns_empty() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"4", b"2"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b"*0\r\n");
+}
+
+/// LRANGE against a key holding a string returns WRONGTYPE, not an array.
+#[test]
+fn lrange_on_string_key_returns_wrongtype() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"s", b"v", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_bulk_string(vec![b"LRANGE", b"s", b"0", b"1"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let expected: &[u8] = b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}
+
+/// Non-numeric indexes are rejected with the Redis error message.
+#[test]
+fn lrange_non_integer_index_returns_error() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"x", b"y"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let expected: &[u8] = b"-ERR value is not an integer or out of range\r\n";
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}
+
+/// An out-of-range LRANGE must not kill the connection or poison the store lock:
+/// a following PING still gets answered.
+#[test]
+fn lrange_out_of_range_keeps_the_server_alive() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"LRANGE", b"k", b"10", b"20"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b"*0\r\n");
+
+    c1.write_all(PING).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 7, Duration::from_secs(2)), b"+PONG\r\n");
+}

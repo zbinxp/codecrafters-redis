@@ -1,4 +1,10 @@
-use std::{collections::HashMap, io, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{
+    cmp::min,
+    collections::HashMap,
+    io,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use bytes::BytesMut;
 use tokio::{
@@ -9,26 +15,28 @@ use tokio::{
 mod resp;
 use resp::{Decoder, Frame};
 
-const WRONGTYPE_KEY_WRONG:&str = "WRONGTYPE Operation against a key holding the wrong kind of value";
+const WRONGTYPE_KEY_WRONG: &str =
+    "WRONGTYPE Operation against a key holding the wrong kind of value";
+const ERR_NOT_VALID_INDEX: &str = "ERR value is not an integer or out of range";
 
 /// the value type in our Store
-struct Entry{
+struct Entry {
     value: Value,
-    expires_at: Option<Instant>
+    expires_at: Option<Instant>,
 }
 
 impl Entry {
-    fn new(value:Value) -> Self {
+    fn new(value: Value) -> Self {
         Self {
             value,
-            expires_at: None
+            expires_at: None,
         }
     }
 }
 
 enum Value {
     String(Vec<u8>),
-    List(Vec<Vec<u8>>)
+    List(Vec<Vec<u8>>),
 }
 
 // impl Value {
@@ -52,7 +60,8 @@ fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
     Frame::simple("PONG")
 }
 
-fn cmd_echo(args: &[Frame], _store: &mut Store) -> Frame { // echo some_value
+fn cmd_echo(args: &[Frame], _store: &mut Store) -> Frame {
+    // echo some_value
     match args.get(1) {
         Some(Frame::BulkString(arg)) => Frame::bulk(arg),
         Some(_) => Frame::Err("ERR echo argument is not a bulk string".into()),
@@ -60,7 +69,8 @@ fn cmd_echo(args: &[Frame], _store: &mut Store) -> Frame { // echo some_value
     }
 }
 
-fn cmd_get(args: &[Frame], store: &mut Store) -> Frame { // get key
+fn cmd_get(args: &[Frame], store: &mut Store) -> Frame {
+    // get key
     match args.get(1) {
         Some(Frame::BulkString(key)) => match store.get(key) {
             Some(entry) => {
@@ -71,9 +81,9 @@ fn cmd_get(args: &[Frame], store: &mut Store) -> Frame { // get key
                 };
                 match &entry.value {
                     Value::String(v) => Frame::bulk(v),
-                    Value::List(_) => Frame::Err("WRONGTYPE Operation".into())
+                    Value::List(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
                 }
-            },
+            }
             None => Frame::Null,
         },
         Some(_) => Frame::Err("ERR wrong format of key".into()),
@@ -85,9 +95,9 @@ fn cmd_set(args: &[Frame], store: &mut Store) -> Frame {
     match parse_set(args) {
         Ok((key, value, expires_at)) => {
             let value = Value::String(value.to_vec());
-            store.insert(key.to_vec(), Entry{value, expires_at});
+            store.insert(key.to_vec(), Entry { value, expires_at });
             Frame::SimpleString(b"OK".to_vec())
-        },
+        }
         Err(frame) => frame,
     }
 }
@@ -99,7 +109,11 @@ fn bulk(frame: Option<&Frame>) -> Option<&[u8]> {
     }
 }
 
-fn parse_millis(bytes:&[u8]) -> Option<u64> {
+fn parse_millis(bytes: &[u8]) -> Option<u64> {
+    str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+fn parse_index(bytes: &[u8]) -> Option<usize> {
     str::from_utf8(bytes).ok()?.parse().ok()
 }
 
@@ -114,17 +128,19 @@ fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), Frame> {
     let Some(value) = bulk(args.get(2)) else {
         return Err(Frame::Err("ERR wrong number of arguments for 'set'".into()));
     };
-    let expires_at = match(args.get(3), args.get(4)) {
+    let expires_at = match (args.get(3), args.get(4)) {
         (None, _) => None,
-        (Some(Frame::BulkString(opt)), Some(Frame::BulkString(ms))) if opt.eq_ignore_ascii_case(b"PX") => {
+        (Some(Frame::BulkString(opt)), Some(Frame::BulkString(ms)))
+            if opt.eq_ignore_ascii_case(b"PX") =>
+        {
             let Some(ms) = parse_millis(ms) else {
                 return Err(Frame::Err("ERR value is not an integer".into()));
             };
             Instant::now().checked_add(Duration::from_millis(ms))
-        },
+        }
         _ => return Err(Frame::Err("ERR syntax error".into())),
     };
-    
+
     Ok((key, value, expires_at))
 }
 
@@ -142,7 +158,7 @@ fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
         .entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::List(Vec::new())));
 
-    if entry.expires_at.is_some_and(|t| t<=Instant::now()) {
+    if entry.expires_at.is_some_and(|t| t <= Instant::now()) {
         *entry = Entry::new(Value::List(Vec::new()));
     }
 
@@ -157,9 +173,48 @@ fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
         list.push(val.to_vec());
     }
     Frame::Int(list.len() as i64)
-    
 }
 
+/// Spec: LRANGE key start stop returns a RESP array of the list elements from start to stop,
+/// stop inclusive
+fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() < 4 {
+        return Frame::Err("ERR wrong number of arguments for 'lrange'".into());
+    }
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'lrange'".into());
+    };
+    let Some(start) = bulk(args.get(2)) else {
+        return Frame::Err("ERR wrong number of arguments for 'lrange'".into());
+    };
+    let Some(stop) = bulk(args.get(3)) else {
+        return Frame::Err("ERR wrong number of arguments for 'lrange'".into());
+    };
+    let Some(start) = parse_index(start) else {
+        return Frame::Err(ERR_NOT_VALID_INDEX.into());
+    };
+
+    let Some(entry) = store.get(key) else {
+        return Frame::Array(Vec::new());
+    };
+    let Some(stop) = parse_index(stop) else {
+        return Frame::Err(ERR_NOT_VALID_INDEX.into());
+    };
+    let Value::List(list) = &entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+
+    if start >= list.len() || start > stop {
+        return Frame::Array(Vec::new());
+    }
+    let stop = min(stop, list.len() - 1);
+    let slice = &list[start..stop + 1];
+    let bulk_str_list: Vec<Frame> = slice
+        .iter()
+        .map(|val| Frame::BulkString(val.to_vec()))
+        .collect();
+    Frame::Array(bulk_str_list)
+}
 
 /// Map a command name to its handler. Adding a command is a one-line change
 /// here plus a new handler -- `execute` stays untouched (Open/Closed).
@@ -170,6 +225,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"GET" => Some(cmd_get),
         b"SET" => Some(cmd_set),
         b"RPUSH" => Some(cmd_rpush),
+        b"LRANGE" => Some(cmd_lrange),
         _ => None,
     }
 }
@@ -204,19 +260,19 @@ struct StreamHandler<S> {
     stream: S,
     decoder: Decoder,
     out: BytesMut,
-    store: Arc<Mutex<Store>>
+    store: Arc<Mutex<Store>>,
 }
 
 impl<S> StreamHandler<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    fn new(stream: S, store:Arc<Mutex<Store>>) -> Self {
+    fn new(stream: S, store: Arc<Mutex<Store>>) -> Self {
         StreamHandler {
             stream,
             decoder: Decoder::new(),
             out: BytesMut::new(),
-            store
+            store,
         }
     }
 
@@ -240,7 +296,7 @@ where
     /// instead of silently swallowing it.
     async fn respond(&mut self, val: Frame) -> io::Result<()> {
         let reply = {
-            let mut store = self.store.lock().unwrap();
+            let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
             execute(&val, &mut store)
         };
         if let Some(reply) = reply {
