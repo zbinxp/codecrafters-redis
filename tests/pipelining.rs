@@ -554,3 +554,61 @@ fn rpush_after_expiry_creates_a_fresh_list() {
     c1.write_all(&command).expect("failed to write");
     assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":1\r\n");
 }
+
+#[test]
+fn appends_multi_value_to_a_list_returns_length() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut out = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"fruits",b"apple", b"banana", b"carrot"], &mut out);
+    c1.write_all(&out).expect("failed to write");
+    assert_eq!(
+        read_at_least(&mut c1, 4, Duration::from_secs(2)),
+        b":3\r\n"
+    );
+}
+
+/// Appending multiple elements to an existing list returns the *total* length,
+/// not the number of elements in this command (lx4).
+#[test]
+fn appends_multiple_to_existing_list_returns_total_length() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"list_key", b"e1", b"e2", b"e3"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":3\r\n");
+
+    command.clear();
+    generate_bulk_string(vec![b"RPUSH", b"list_key", b"e4", b"e5"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":5\r\n");
+}
+
+/// RPUSH against a key holding a string must fail with WRONGTYPE rather than
+/// silently reporting a bogus length.
+#[test]
+fn rpush_on_a_string_key_returns_wrongtype() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"s", b"v", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    command.clear();
+    generate_bulk_string(vec![b"RPUSH", b"s", b"x"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+
+    let expected: &[u8] = b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+    assert_eq!(
+        read_at_least(&mut c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}

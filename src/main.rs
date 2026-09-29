@@ -9,6 +9,8 @@ use tokio::{
 mod resp;
 use resp::{Decoder, Frame};
 
+const WRONGTYPE_KEY_WRONG:&str = "WRONGTYPE Operation against a key holding the wrong kind of value";
+
 /// the value type in our Store
 struct Entry{
     value: Value,
@@ -29,17 +31,17 @@ enum Value {
     List(Vec<Vec<u8>>)
 }
 
-impl Value {
-    fn rpush(&mut self, elem: Vec<u8>) -> Option<usize> {
-        match self {
-            Value::String(_) => None,
-            Value::List(list) => {
-                list.push(elem);
-                Some(list.len())
-            }
-        }
-    }
-}
+// impl Value {
+//     fn rpush(&mut self, elem: Vec<u8>) -> Option<usize> {
+//         match self {
+//             Value::String(_) => None,
+//             Value::List(list) => {
+//                 list.push(elem);
+//                 Some(list.len())
+//             }
+//         }
+//     }
+// }
 
 /// A command handler receives the full argument list (index 0 is the command
 /// name) and produces a reply.
@@ -132,25 +134,30 @@ fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
         return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
     };
-    let Some(value) = bulk(args.get(2)) else {
+    if args.len() < 3 {
         return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
-    };
-    if let Some(entry) = store.get_mut(key) {
-        // check expires_at for absent key
-        if let Some(expires_at) = entry.expires_at {
-            if expires_at <= Instant::now() {
-                // create a new list
-                *entry = Entry::new(Value::List(Vec::new()));
-            }
-        }
-        match entry.value.rpush(value.to_vec()) {
-            None => Frame::Err("WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-            Some(len) => Frame::Int(len as i64)
-        }
-    } else {
-        store.insert(key.to_vec(), Entry::new(Value::List(vec![value.to_vec()])));
-        Frame::Int(1)
     }
+
+    let entry = store
+        .entry(key.to_vec())
+        .or_insert_with(|| Entry::new(Value::List(Vec::new())));
+
+    if entry.expires_at.is_some_and(|t| t<=Instant::now()) {
+        *entry = Entry::new(Value::List(Vec::new()));
+    }
+
+    let Value::List(list) = &mut entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+
+    for elem in &args[2..] {
+        let Some(val) = bulk(Some(elem)) else {
+            return Frame::Err("ERR wrong format of arguments for 'rpush'".into());
+        };
+        list.push(val.to_vec());
+    }
+    Frame::Int(list.len() as i64)
+    
 }
 
 
