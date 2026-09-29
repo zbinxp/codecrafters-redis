@@ -792,3 +792,95 @@ fn lrange_out_of_range_keeps_the_server_alive() {
     c1.write_all(PING).expect("failed to write");
     assert_eq!(read_at_least(&mut c1, 7, Duration::from_secs(2)), b"+PONG\r\n");
 }
+
+/// Send `LRANGE k <start> <stop>` against the `[a,b,c,d,e]` list and assert the
+/// raw reply.
+fn assert_lrange(c1: &mut TcpStream, start: &str, stop: &str, expected: &[u8]) {
+    let args: Vec<&[u8]> = vec![b"LRANGE", b"k", start.as_bytes(), stop.as_bytes()];
+    let mut command = BytesMut::new();
+    generate_bulk_string(args, &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(
+        read_at_least(c1, expected.len(), Duration::from_secs(2)),
+        expected
+    );
+}
+
+/// `-2 -1` selects the last two elements.
+#[test]
+fn lrange_negative_indexes_return_last_two() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "-2", "-1", b"*2\r\n$1\r\nd\r\n$1\r\ne\r\n");
+}
+
+/// `0 -3` selects everything except the last two elements.
+#[test]
+fn lrange_positive_start_negative_stop() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "0", "-3", b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+/// A positive start with a negative stop.
+#[test]
+fn lrange_mixed_indexes() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "2", "-1", b"*3\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n");
+}
+
+/// `-1 -1` selects exactly the last element.
+#[test]
+fn lrange_single_negative_index() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "-1", "-1", b"*1\r\n$1\r\ne\r\n");
+}
+
+/// A negative start below the list wraps to 0 (start of the list).
+#[test]
+fn lrange_negative_start_out_of_range_clamps_to_zero() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "-6", "2", b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+/// Indexes beyond both ends of the list clamp to the full list.
+#[test]
+fn lrange_negative_beyond_both_ends_returns_all() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    let expected: &[u8] = b"*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
+    assert_lrange(&mut c1, "-100", "100", expected);
+}
+
+/// A negative stop that maps below 0 is left negative (Redis semantics), so
+/// `start > stop` and the result is empty -- not clamped to the first element.
+#[test]
+fn lrange_out_of_range_negative_stop_returns_empty() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    push_abcde(&mut c1);
+
+    assert_lrange(&mut c1, "0", "-6", b"*0\r\n");
+}

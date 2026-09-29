@@ -113,7 +113,7 @@ fn parse_millis(bytes: &[u8]) -> Option<u64> {
     str::from_utf8(bytes).ok()?.parse().ok()
 }
 
-fn parse_index(bytes: &[u8]) -> Option<usize> {
+fn parse_index(bytes: &[u8]) -> Option<i64> {
     str::from_utf8(bytes).ok()?.parse().ok()
 }
 
@@ -204,11 +204,20 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
 
-    if start >= list.len() || start > stop {
+    let len = list.len() as i64;
+    if len == 0 {
         return Frame::Array(Vec::new());
     }
-    let stop = min(stop, list.len() - 1);
-    let slice = &list[start..stop + 1];
+    let mut start = start;
+    let mut stop = stop;
+    if start < 0 { start += len;}
+    if stop < 0 { stop += len;}
+    if start < 0 { start = 0;}
+    if start >= len || start > stop {
+        return Frame::Array(Vec::new());
+    }
+    let stop = min(stop, len - 1);
+    let slice = &list[start as usize..=stop as usize];
     let bulk_str_list: Vec<Frame> = slice
         .iter()
         .map(|val| Frame::BulkString(val.to_vec()))
