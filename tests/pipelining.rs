@@ -732,3 +732,46 @@ fn lpush_on_string_key_returns_wrongtype() {
     t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
     t.client.cmd(&[b"LPUSH", b"k", b"x"]).expect(WRONGTYPE);
 }
+
+#[test]
+fn llen_return_zero_on_missing_key() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"LLEN", b"k"]).expect(b":0\r\n");
+}
+
+#[test]
+fn llen_return_length_on_list() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a",b"b",b"c"]).expect(b":3\r\n");
+    t.client.cmd(&[b"LLEN",b"k"]).expect(b":3\r\n");
+}
+
+/// LLEN against a key holding a string returns WRONGTYPE.
+#[test]
+fn llen_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"LLEN", b"s"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent: LLEN returns 0, not WRONGTYPE.
+#[test]
+fn llen_on_expired_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+
+    sleep(Duration::from_millis(200));
+
+    t.client.cmd(&[b"LLEN", b"k"]).expect(b":0\r\n");
+}
+
+/// LLEN takes exactly one argument; extra args are an error.
+#[test]
+fn llen_with_extra_args_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"LLEN", b"k", b"extra"])
+        .expect(b"-ERR wrong number of arguments for 'llen' command\r\n");
+}

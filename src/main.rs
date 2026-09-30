@@ -66,24 +66,18 @@ fn cmd_echo(args: &[Frame], _store: &mut Store) -> Frame {
 }
 
 fn cmd_get(args: &[Frame], store: &mut Store) -> Frame {
-    // get key
-    match args.get(1) {
-        Some(Frame::BulkString(key)) => match store.get(key) {
-            Some(entry) => {
-                if let Some(expire_at) = entry.expires_at {
-                    if expire_at <= Instant::now() {
-                        return Frame::Null;
-                    }
-                };
-                match &entry.value {
-                    Value::String(v) => Frame::bulk(v),
-                    Value::List(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
-                }
-            }
-            None => Frame::Null,
-        },
-        Some(_) => Frame::Err("ERR wrong format of key".into()),
-        None => Frame::Err("ERR wrong number of arguments".into()),
+    if args.len() != 2 {
+        return Frame::Err("ERR wrong number of arguments for 'get' command".into());
+    }
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong format of arguments".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Null;
+    };
+    match &entry.value {
+        Value::List(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
+        Value::String(val) => Frame::bulk(val)
     }
 }
 
@@ -228,6 +222,30 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
     Frame::Array(bulk_str_list)
 }
 
+/// Spec: LLEN key returns the list length as a RESP integer. Missing list → :0\r\n.
+fn cmd_llen(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 2 {
+        return Frame::Err("ERR wrong number of arguments for 'llen' command".into());
+    }
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'llen' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Int(0);
+    };
+
+    match &entry.value {
+        Value::List(list) => Frame::Int(list.len() as i64),
+        Value::String(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+    }
+}
+
+fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a Entry> {
+    if store.get(key).and_then(|e|e.expires_at).is_some_and(|t|t <= Instant::now()) {
+        store.remove(key);
+    }
+    store.get(key)
+}
 
 /// Map a command name to its handler. Adding a command is a one-line change
 /// here plus a new handler -- `execute` stays untouched (Open/Closed).
@@ -240,6 +258,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"RPUSH" => Some(cmd_rpush),
         b"LPUSH" => Some(cmd_lpush),
         b"LRANGE" => Some(cmd_lrange),
+        b"LLEN" => Some(cmd_llen),
         _ => None,
     }
 }
