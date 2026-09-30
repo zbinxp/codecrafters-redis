@@ -884,3 +884,98 @@ fn lrange_out_of_range_negative_stop_returns_empty() {
 
     assert_lrange(&mut c1, "0", "-6", b"*0\r\n");
 }
+
+fn assert_lpush(stream: &mut TcpStream, values: Vec<&[u8]>, expected:&[u8]) {
+    let mut command = BytesMut::new();
+    let mut args:Vec<&[u8]> = vec![b"LPUSH", b"k",];
+    args.extend(values);
+    generate_bulk_string(args, &mut command);
+    stream.write_all(&command).expect("failed to write");
+    let got = read_at_least(stream, expected.len(), Duration::from_secs(2));
+    assert_eq!(
+        got,
+        expected
+    )
+}
+
+#[test]
+fn lpush_one_returns_one() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    assert_lpush(&mut c1, vec![b"c"], b":1\r\n");
+}
+
+#[test]
+fn lpush_three_then_lrange_returns_array() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    assert_lpush(&mut c1, vec![b"c", b"b",b"a"], b":3\r\n");
+    // read to make sure data written
+    assert_lrange(&mut c1, "0", "-1", b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+#[test]
+fn lpush_less_args_return_wrong_number_of_arguments() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+    assert_lpush(&mut c1, vec![], b"-ERR wrong number of arguments for 'lpush'\r\n");
+}
+
+/// The exact spec flow: two LPUSH commands onto the same key, then LRANGE.
+#[test]
+fn lpush_across_commands_returns_length_and_is_reversed() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    assert_lpush(&mut c1, vec![b"c"], b":1\r\n");
+    assert_lpush(&mut c1, vec![b"b", b"a"], b":3\r\n");
+    assert_lrange(&mut c1, "0", "-1", b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+/// A single multi-element LPUSH prepends each element in turn, reversing order.
+#[test]
+fn lpush_multiple_reverses_order() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    assert_lpush(&mut c1, vec![b"a", b"b", b"c"], b":3\r\n");
+    assert_lrange(&mut c1, "0", "-1", b"*3\r\n$1\r\nc\r\n$1\r\nb\r\n$1\r\na\r\n");
+}
+
+/// RPUSH then LPUSH on the same key: the prepend lands before the appended element.
+#[test]
+fn lpush_after_rpush_prepends_before() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_bulk_string(vec![b"RPUSH", b"k", b"x"], &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 4, Duration::from_secs(2)), b":1\r\n");
+
+    assert_lpush(&mut c1, vec![b"y"], b":2\r\n");
+    assert_lrange(&mut c1, "0", "-1", b"*2\r\n$1\r\ny\r\n$1\r\nx\r\n");
+}
+
+/// LPUSH against a key holding a string fails with WRONGTYPE.
+#[test]
+fn lpush_on_string_key_returns_wrongtype() {
+    let _guard = lock_server();
+    let _server = Server::start();
+    let mut c1 = TcpStream::connect(ADDR).expect("failed to connect");
+
+    let mut command = BytesMut::new();
+    generate_set_command(b"k", b"v", &mut command);
+    c1.write_all(&command).expect("failed to write");
+    assert_eq!(read_at_least(&mut c1, 5, Duration::from_secs(2)), b"+OK\r\n");
+
+    let expected: &[u8] =
+        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+    assert_lpush(&mut c1, vec![b"x"], expected);
+}

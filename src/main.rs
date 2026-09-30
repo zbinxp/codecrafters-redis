@@ -1,9 +1,5 @@
 use std::{
-    cmp::min,
-    collections::HashMap,
-    io,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    cmp::min, collections::{HashMap, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant},
 };
 
 use bytes::BytesMut;
@@ -36,7 +32,7 @@ impl Entry {
 
 enum Value {
     String(Vec<u8>),
-    List(Vec<Vec<u8>>),
+    List(VecDeque<Vec<u8>>),
 }
 
 // impl Value {
@@ -147,19 +143,28 @@ fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), Frame> {
 /// Spec: RPUSH <key> <element> appends to a list (creating it if absent), and returns the list length as a RESP
 /// integer
 fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
+    push_impl(args, store, "rpush", VecDeque::push_back)
+}
+
+/// Spec: LPUSH key elem [elem...] prepends elements to the list, returning the new length.
+fn cmd_lpush(args: &[Frame], store: &mut Store) -> Frame {
+    push_impl(args, store, "lpush", VecDeque::push_front)
+}
+
+fn push_impl(args: &[Frame], store: &mut Store, fn_name:&str, push:fn(&mut VecDeque<Vec<u8>>,Vec<u8>)) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
-        return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
+        return Frame::Err(format!("ERR wrong number of arguments for '{}'",fn_name));
     };
     if args.len() < 3 {
-        return Frame::Err("ERR wrong number of arguments for 'rpush'".into());
+        return Frame::Err(format!("ERR wrong number of arguments for '{}'",fn_name));
     }
 
     let entry = store
         .entry(key.to_vec())
-        .or_insert_with(|| Entry::new(Value::List(Vec::new())));
+        .or_insert_with(|| Entry::new(Value::List(VecDeque::new())));
 
     if entry.expires_at.is_some_and(|t| t <= Instant::now()) {
-        *entry = Entry::new(Value::List(Vec::new()));
+        *entry = Entry::new(Value::List(VecDeque::new()));
     }
 
     let Value::List(list) = &mut entry.value else {
@@ -170,7 +175,7 @@ fn cmd_rpush(args: &[Frame], store: &mut Store) -> Frame {
         let Some(val) = bulk(Some(elem)) else {
             return Frame::Err("ERR wrong format of arguments for 'rpush'".into());
         };
-        list.push(val.to_vec());
+        push(list,val.to_vec());
     }
     Frame::Int(list.len() as i64)
 }
@@ -217,13 +222,12 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Array(Vec::new());
     }
     let stop = min(stop, len - 1);
-    let slice = &list[start as usize..=stop as usize];
-    let bulk_str_list: Vec<Frame> = slice
-        .iter()
+    let bulk_str_list: Vec<Frame> = list.range(start as usize..=stop as usize)
         .map(|val| Frame::BulkString(val.to_vec()))
         .collect();
     Frame::Array(bulk_str_list)
 }
+
 
 /// Map a command name to its handler. Adding a command is a one-line change
 /// here plus a new handler -- `execute` stays untouched (Open/Closed).
@@ -234,6 +238,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"GET" => Some(cmd_get),
         b"SET" => Some(cmd_set),
         b"RPUSH" => Some(cmd_rpush),
+        b"LPUSH" => Some(cmd_lpush),
         b"LRANGE" => Some(cmd_lrange),
         _ => None,
     }
