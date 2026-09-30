@@ -240,11 +240,33 @@ fn cmd_llen(args: &[Frame], store: &mut Store) -> Frame {
     }
 }
 
-fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a Entry> {
+/// Spec: LPOP key removes and returns the first element as a bulk string. 
+/// Missing/empty list → $-1\r\n.
+fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 2 {
+        return Frame::Err("ERR wrong number of arguments for 'lpop' command".into());
+    }
+
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'lpop' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Null;
+    };
+    match &mut entry.value {
+        Value::List(list) => match list.pop_front(){
+            None => return Frame::Null,
+            Some(elm) => Frame::bulk(elm),
+        },
+        Value::String(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+    }
+}
+
+fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a mut Entry> {
     if store.get(key).and_then(|e|e.expires_at).is_some_and(|t|t <= Instant::now()) {
         store.remove(key);
     }
-    store.get(key)
+    store.get_mut(key)
 }
 
 /// Map a command name to its handler. Adding a command is a one-line change
@@ -259,6 +281,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"LPUSH" => Some(cmd_lpush),
         b"LRANGE" => Some(cmd_lrange),
         b"LLEN" => Some(cmd_llen),
+        b"LPOP" => Some(cmd_lpop),
         _ => None,
     }
 }

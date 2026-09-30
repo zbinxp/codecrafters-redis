@@ -775,3 +775,87 @@ fn llen_with_extra_args_returns_error() {
         .cmd(&[b"LLEN", b"k", b"extra"])
         .expect(b"-ERR wrong number of arguments for 'llen' command\r\n");
 }
+
+#[test]
+fn rpush_then_pop_return_the_first_element() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"RPUSH", b"k", b"one", b"two",b"three"])
+        .expect(b":3\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k"])
+        .expect(b"$3\r\none\r\n");
+}
+
+#[test]
+fn lpop_missing_key_return_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"LPOP", b"missing"])
+        .expect(b"$-1\r\n");
+}
+
+/// The spec checks that the popped element is gone and the rest shift down.
+#[test]
+fn lpop_removes_from_the_front_and_shifts() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"RPUSH", b"k", b"one", b"two", b"three", b"four", b"five"])
+        .expect(b":5\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$3\r\none\r\n");
+    t.client
+        .cmd(&[b"LRANGE", b"k", b"0", b"-1"])
+        .expect(b"*4\r\n$3\r\ntwo\r\n$5\r\nthree\r\n$4\r\nfour\r\n$4\r\nfive\r\n");
+}
+
+/// Popping the last element empties the list; the next pop returns null.
+#[test]
+fn lpop_drains_list_then_returns_null() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"x"]).expect(b":1\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$1\r\nx\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$-1\r\n");
+}
+
+/// LPOP takes from the head, so an LPUSH'd element comes out first.
+#[test]
+fn lpop_takes_the_head_pushed_by_lpush() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a", b"b"]).expect(b":2\r\n");
+    t.client.cmd(&[b"LPUSH", b"k", b"z"]).expect(b":3\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$1\r\nz\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$1\r\na\r\n");
+    t.client
+        .cmd(&[b"LRANGE", b"k", b"0", b"-1"])
+        .expect(b"*1\r\n$1\r\nb\r\n");
+}
+
+/// LPOP against a key holding a string returns WRONGTYPE.
+#[test]
+fn lpop_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"LPOP", b"s"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent: LPOP returns null, not WRONGTYPE.
+#[test]
+fn lpop_on_expired_key_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+
+    sleep(Duration::from_millis(200));
+
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$-1\r\n");
+}
+
+/// LPOP takes exactly one argument for now; extra args are an error.
+#[test]
+fn lpop_with_extra_args_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"LPOP", b"k", b"extra"])
+        .expect(b"-ERR wrong number of arguments for 'lpop' command\r\n");
+}
