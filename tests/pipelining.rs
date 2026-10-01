@@ -132,6 +132,7 @@ impl Client {
     /// Read at least `expected.len()` bytes and assert equality.
     fn expect(&mut self, expected: &[u8]) {
         let got = read_at_least(&mut self.0, expected.len(), TIMEOUT);
+        dbg!(String::from_utf8_lossy(&got));
         assert_eq!(got.as_slice(), expected);
     }
 
@@ -851,11 +852,85 @@ fn lpop_on_expired_key_returns_null() {
     t.client.cmd(&[b"LPOP", b"k"]).expect(b"$-1\r\n");
 }
 
-/// LPOP takes exactly one argument for now; extra args are an error.
+/// The spec: `LPOP k 2` returns the first two as an array and shifts the rest down.
 #[test]
-fn lpop_with_extra_args_returns_error() {
+fn lpop_count_two_removes_from_front() {
     let mut t = TestCtx::new();
     t.client
-        .cmd(&[b"LPOP", b"k", b"extra"])
-        .expect(b"-ERR wrong number of arguments for 'lpop' command\r\n");
+        .cmd(&[b"RPUSH", b"k", b"one", b"two", b"three", b"four", b"five"])
+        .expect(b":5\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k", b"2"])
+        .expect(b"*2\r\n$3\r\none\r\n$3\r\ntwo\r\n");
+    t.client
+        .cmd(&[b"LRANGE", b"k", b"0", b"-1"])
+        .expect(b"*3\r\n$5\r\nthree\r\n$4\r\nfour\r\n$4\r\nfive\r\n");
 }
+
+/// A count of 1 still returns an *array* (unlike the count-less form).
+#[test]
+fn lpop_count_one_returns_array() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a", b"b", b"c"]).expect(b":3\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k", b"1"])
+        .expect(b"*1\r\n$1\r\na\r\n");
+}
+
+/// A count of 0 removes nothing and returns an empty array.
+#[test]
+fn lpop_count_zero_returns_empty_array() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a"]).expect(b":1\r\n");
+    t.client.cmd(&[b"LPOP", b"k", b"0"]).expect(b"*0\r\n");
+}
+
+/// A count greater than the length removes everything and returns all elements.
+#[test]
+fn lpop_count_exceeding_length_returns_all() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a", b"b", b"c"]).expect(b":3\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k", b"99"])
+        .expect(b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    t.client.cmd(&[b"LPOP", b"k"]).expect(b"$-1\r\n");
+}
+
+/// With a count, a missing key replies with a null *array* (`*-1`), not `$-1`.
+#[test]
+fn lpop_missing_with_count_returns_null_array() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"LPOP", b"missing", b"2"])
+        .expect(b"*-1\r\n");
+}
+
+/// A negative count is rejected.
+#[test]
+fn lpop_negative_count_returns_error() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k", b"-1"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+}
+
+/// A non-integer count is rejected.
+#[test]
+fn lpop_non_integer_count_returns_error() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"LPOP", b"k", b"x"])
+        .expect(b"-ERR value is not an integer or out of range\r\n");
+}
+
+/// A count on a string key is still WRONGTYPE.
+#[test]
+fn lpop_with_count_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"LPOP", b"s", b"2"]).expect(WRONGTYPE);
+}
+
+

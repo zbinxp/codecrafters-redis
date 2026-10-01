@@ -14,7 +14,8 @@ pub enum Frame {
     Int(i64),          // :42\r\n
     Array(Vec<Frame>),     // *2\r\n$4\r\nECHO\r\n$5\r\nHello\r\n
     Err(String),           // -ERR msg\r\n
-    Null
+    Null,
+    NullArray,
 }
 
 impl Frame {
@@ -54,6 +55,9 @@ impl Frame {
             },
             Self::Null => {
                 out.extend_from_slice(b"$-1\r\n");
+            },
+            Self::NullArray => {
+                out.extend_from_slice(b"*-1\r\n");
             }
         }
     }
@@ -192,6 +196,13 @@ mod tests {
         let mut out = BytesMut::new();
         Frame::Null.encode(&mut out);
         assert_eq!(&out[..], b"$-1\r\n");
+    }
+
+    #[test]
+    fn encodes_null_array() {
+        let mut out = BytesMut::new();
+        Frame::NullArray.encode(&mut out);
+        assert_eq!(&out[..], b"*-1\r\n");
     }
 
     #[test]

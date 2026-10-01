@@ -14,6 +14,7 @@ use resp::{Decoder, Frame};
 const WRONGTYPE_KEY_WRONG: &str =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
 const ERR_NOT_VALID_INDEX: &str = "ERR value is not an integer or out of range";
+const ERR_VALUE_OUT_OF_RANGE: &str = "ERR value is out of range, must be positive";
 
 /// the value type in our Store
 struct Entry {
@@ -242,21 +243,47 @@ fn cmd_llen(args: &[Frame], store: &mut Store) -> Frame {
 
 /// Spec: LPOP key removes and returns the first element as a bulk string. 
 /// Missing/empty list → $-1\r\n.
+/// Spec: LPOP key 2 removes and returns the first N elements as a RESP array. 
+/// If N > length, remove all and return them.
 fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Frame::Err("ERR wrong number of arguments for 'lpop' command".into());
     }
 
     let Some(key) = bulk(args.get(1)) else {
         return Frame::Err("ERR wrong number of arguments for 'lpop' command".into());
     };
-    let Some(entry) = live_entry(store, key) else {
-        return Frame::Null;
+    
+    let count = match bulk(args.get(2)) {
+        Some(val) => match parse_index(val) {
+            Some(index) => {
+                if index < 0 {
+                    return Frame::Err(ERR_VALUE_OUT_OF_RANGE.into());
+                }
+                Some(index)
+            },
+            None => return Frame::Err(ERR_NOT_VALID_INDEX.into())
+        },
+        None => None
     };
+    let Some(entry) = live_entry(store, key) else {
+        return count.map_or(Frame::Null, |_|Frame::NullArray);
+    };
+
     match &mut entry.value {
-        Value::List(list) => match list.pop_front(){
-            None => return Frame::Null,
-            Some(elm) => Frame::bulk(elm),
+        Value::List(list) => {
+            match count {
+                None => match list.pop_front() {
+                    Some(v) => Frame::bulk(v),
+                    None => Frame::Null,
+                },
+                Some(n) => {
+                    let n = n.min(list.len() as i64);
+                    let removed: Vec<Frame> = (0..n).filter_map(|_|list.pop_front())
+                        .map(Frame::bulk).collect();
+                    Frame::Array(removed)
+                }
+            }          
         },
         Value::String(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into())
     }
