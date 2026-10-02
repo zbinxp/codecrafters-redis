@@ -934,3 +934,69 @@ fn lpop_with_count_on_string_key_returns_wrongtype() {
 }
 
 
+#[test]
+fn blpop_single_waiter_return_key_value_array() {
+    let mut t = TestCtx::new();
+    let mut pusher = t.connect();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"0"])
+        .expect_silent(Duration::from_millis(300));
+    pusher.cmd(&[b"RPUSH",b"k",b"foo"]).expect(b":1\r\n");
+    t.client.expect(b"*2\r\n$1\r\nk\r\n$3\r\nfoo\r\n");
+}
+
+/// If the list already has an element, BLPOP returns it without blocking.
+#[test]
+fn blpop_returns_immediately_when_list_has_elements() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"k", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"0"])
+        .expect(b"*2\r\n$1\r\nk\r\n$1\r\na\r\n");
+}
+
+/// With two blocked clients, the one that waited longest is served first.
+#[test]
+fn blpop_serves_longest_waiting_client_first() {
+    let mut t = TestCtx::new();
+    let mut c2 = t.connect();
+    let mut pusher = t.connect();
+
+    t.client.cmd(&[b"BLPOP", b"k", b"0"]);
+    t.client.expect_silent(Duration::from_millis(200)); // c1 registered first
+    c2.cmd(&[b"BLPOP", b"k", b"0"]);
+    c2.expect_silent(Duration::from_millis(200));
+
+    pusher.cmd(&[b"RPUSH", b"k", b"one"]).expect(b":1\r\n");
+    t.client.expect(b"*2\r\n$1\r\nk\r\n$3\r\none\r\n");
+    c2.expect_silent(Duration::from_millis(200)); // c2 still waiting
+
+    pusher.cmd(&[b"RPUSH", b"k", b"two"]).expect(b":1\r\n");
+    c2.expect(b"*2\r\n$1\r\nk\r\n$3\r\ntwo\r\n");
+}
+
+/// BLPOP against a string key is WRONGTYPE, not an indefinite block.
+#[test]
+fn blpop_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"BLPOP", b"s", b"0"]).expect(WRONGTYPE);
+}
+
+/// A negative timeout is rejected.
+#[test]
+fn blpop_with_negative_timeout_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"-1"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+}
+
+/// BLPOP with no key is an arity error.
+#[test]
+fn blpop_without_key_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP"])
+        .expect(b"-ERR wrong number of arguments for 'blpop' command\r\n");
+}

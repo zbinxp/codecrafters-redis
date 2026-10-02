@@ -6,6 +6,8 @@ use bytes::BytesMut;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
+    sync::oneshot,
+    time::sleep
 };
 
 mod resp;
@@ -36,22 +38,24 @@ enum Value {
     List(VecDeque<Vec<u8>>),
 }
 
-// impl Value {
-//     fn rpush(&mut self, elem: Vec<u8>) -> Option<usize> {
-//         match self {
-//             Value::String(_) => None,
-//             Value::List(list) => {
-//                 list.push(elem);
-//                 Some(list.len())
-//             }
-//         }
-//     }
-// }
+struct Db {
+    data: HashMap<Vec<u8>, Entry>,
+    waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
+}
+
+impl Db {
+    fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            waiters: HashMap::new()
+        }
+    }
+}
 
 /// A command handler receives the full argument list (index 0 is the command
 /// name) and produces a reply.
 type Handler = fn(&[Frame], &mut Store) -> Frame;
-type Store = HashMap<Vec<u8>, Entry>;
+type Store = Db;
 
 fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
     Frame::simple("PONG")
@@ -86,7 +90,7 @@ fn cmd_set(args: &[Frame], store: &mut Store) -> Frame {
     match parse_set(args) {
         Ok((key, value, expires_at)) => {
             let value = Value::String(value.to_vec());
-            store.insert(key.to_vec(), Entry { value, expires_at });
+            store.data.insert(key.to_vec(), Entry { value, expires_at });
             Frame::SimpleString(b"OK".to_vec())
         }
         Err(frame) => frame,
@@ -154,7 +158,7 @@ fn push_impl(args: &[Frame], store: &mut Store, fn_name:&str, push:fn(&mut VecDe
         return Frame::Err(format!("ERR wrong number of arguments for '{}'",fn_name));
     }
 
-    let entry = store
+    let entry = store.data
         .entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::List(VecDeque::new())));
 
@@ -171,6 +175,16 @@ fn push_impl(args: &[Frame], store: &mut Store, fn_name:&str, push:fn(&mut VecDe
             return Frame::Err("ERR wrong format of arguments for 'rpush'".into());
         };
         push(list,val.to_vec());
+
+        // still hold the lock, notify the waiters
+        if let Some(q) = store.waiters.get_mut(key) {
+            while !q.is_empty() {
+                let tx = q.pop_front().unwrap();
+                if tx.send(()).is_ok() {
+                    break;
+                }
+            }
+        }
     }
     Frame::Int(list.len() as i64)
 }
@@ -194,7 +208,7 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err(ERR_NOT_VALID_INDEX.into());
     };
 
-    let Some(entry) = store.get(key) else {
+    let Some(entry) = store.data.get(key) else {
         return Frame::Array(Vec::new());
     };
     let Some(stop) = parse_index(stop) else {
@@ -289,11 +303,53 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
     }
 }
 
-fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a mut Entry> {
-    if store.get(key).and_then(|e|e.expires_at).is_some_and(|t|t <= Instant::now()) {
-        store.remove(key);
+/// BLPOP key timeout → on success, a 2-element array [key, element]:
+async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err(format!("ERR wrong number of arguments for '{}' command", "blpop"));
+    };
+    let timeout = match bulk(args.get(2)) {
+        Some(val) => match parse_index(val) {
+            Some(timeout) => timeout,
+            None => return Frame::Err(ERR_NOT_VALID_INDEX.into()),
+        },
+        None => 0
+    };
+
+    if timeout < 0 {
+        return Frame::Err(ERR_VALUE_OUT_OF_RANGE.into());
     }
-    store.get_mut(key)
+
+    let timeout = Duration::from_secs(timeout as u64);
+    loop { // when notified, we need a loop to check if value is arrived
+        let rx = {
+            let mut db = store.lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(entry) = db.data.get_mut(key) {
+                let Value::List(list) = &mut entry.value else{
+                    return Frame::Err(WRONGTYPE_KEY_WRONG.into());     
+                };
+                if let Some(v) = list.pop_front() {
+                    return Frame::Array(vec![Frame::bulk(key), Frame::bulk(v)])
+                }
+            }
+            
+            // if no value got, wait for notify
+            let (tx, rx) = oneshot::channel();
+            db.waiters.entry(key.to_vec()).or_default().push_back(tx);
+            rx
+        };
+        tokio::select! {
+            _ = rx => continue,
+            _ = sleep(timeout), if !timeout.is_zero() => return Frame::NullArray
+        }
+    }
+}
+
+fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a mut Entry> {
+    if store.data.get(key).and_then(|e|e.expires_at).is_some_and(|t|t <= Instant::now()) {
+        store.data.remove(key);
+    }
+    store.data.get_mut(key)
 }
 
 /// Map a command name to its handler. Adding a command is a one-line change
@@ -378,16 +434,27 @@ where
     /// Returns the error from the write so the caller can close the connection
     /// instead of silently swallowing it.
     async fn respond(&mut self, val: Frame) -> io::Result<()> {
-        let reply = {
-            let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            execute(&val, &mut store)
-        };
+        let reply = self.generate_reply(&val).await;
         if let Some(reply) = reply {
             self.out.clear();
             reply.encode(&mut self.out);
             self.stream.write_all(&self.out).await?;
         }
         Ok(())
+    }
+
+    async fn generate_reply(&mut self, f:&Frame) -> Option<Frame> {
+        
+        // check if command is blpop
+        if let Frame::Array(args) = f {
+            if let Some(cmd) = bulk(args.get(0)) {
+                if &cmd == b"BLPOP" {
+                    return Some(blpop(args, self.store.clone()).await);
+                }
+            }
+        }
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        execute(f, &mut store)
     }
 }
 
