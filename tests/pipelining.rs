@@ -1000,3 +1000,67 @@ fn blpop_without_key_returns_error() {
         .cmd(&[b"BLPOP"])
         .expect(b"-ERR wrong number of arguments for 'blpop' command\r\n");
 }
+
+/// A non-zero fractional timeout with nothing pushed returns a null array.
+#[test]
+fn blpop_fractional_timeout_returns_null_array() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"0.1"])
+        .expect(b"*-1\r\n");
+}
+
+/// A push before the timeout expires still wakes the waiter.
+#[test]
+fn blpop_fractional_timeout_wakes_on_push() {
+    let mut t = TestCtx::new();
+    let mut pusher = t.connect();
+
+    t.client.cmd(&[b"BLPOP", b"k", b"0.5"]);
+    t.client.expect_silent(Duration::from_millis(100));
+    pusher.cmd(&[b"RPUSH", b"k", b"foo"]).expect(b":1\r\n");
+    t.client.expect(b"*2\r\n$1\r\nk\r\n$3\r\nfoo\r\n");
+}
+
+/// An integer timeout still works (regression for the seconds conversion).
+#[test]
+fn blpop_integer_timeout_returns_null_array() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"BLPOP", b"k", b"1"]).expect(b"*-1\r\n");
+}
+
+/// `nan` must be rejected with an error, not panic the connection task.
+#[test]
+fn blpop_nan_timeout_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"nan"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+    // the connection must stay usable after the error
+    t.client.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+}
+
+/// `inf` is rejected.
+#[test]
+fn blpop_inf_timeout_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"inf"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+}
+
+/// A negative fractional timeout is rejected.
+#[test]
+fn blpop_negative_fractional_timeout_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BLPOP", b"k", b"-0.5"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+}
+
+#[test]
+fn blpop_err_with_negative_timeout() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"BLPOP", b"k", b"-0.5"])
+        .expect(b"-ERR value is out of range, must be positive\r\n");
+}

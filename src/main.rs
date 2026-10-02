@@ -112,6 +112,10 @@ fn parse_index(bytes: &[u8]) -> Option<i64> {
     str::from_utf8(bytes).ok()?.parse().ok()
 }
 
+fn parse_f64(bytes: &[u8]) -> Option<f64> {
+    str::from_utf8(bytes).ok()?.parse().ok()
+}
+
 // SET <key> <value> [PX <milliseconds>]
 fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), Frame> {
     if args.len() > 5 {
@@ -304,23 +308,24 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
 }
 
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
+/// xj7: Spec: BLPOP key <timeout> where the timeout can be fractional seconds
 async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
         return Frame::Err(format!("ERR wrong number of arguments for '{}' command", "blpop"));
     };
     let timeout = match bulk(args.get(2)) {
-        Some(val) => match parse_index(val) {
+        Some(val) => match parse_f64(val) {
             Some(timeout) => timeout,
-            None => return Frame::Err(ERR_NOT_VALID_INDEX.into()),
+            None => return Frame::Err("ERR timeout is not a float or out of range".into()),
         },
-        None => 0
+        None => 0.0
     };
 
-    if timeout < 0 {
+    if !timeout.is_finite() || timeout < 0.0 {
         return Frame::Err(ERR_VALUE_OUT_OF_RANGE.into());
     }
 
-    let timeout = Duration::from_secs(timeout as u64);
+    let timeout = Duration::from_secs_f64(timeout);
     loop { // when notified, we need a loop to check if value is arrived
         let rx = {
             let mut db = store.lock().unwrap_or_else(|e|e.into_inner());
