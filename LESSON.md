@@ -1,7 +1,7 @@
 # LESSON.md — 经验与教训汇总
 
 > 项目：CodeCrafters "Build Your Own Redis"（Rust）。
-> 覆盖范围：la7（SET/GET）→ gu5（LPUSH），以及测试基础设施重构。
+> 覆盖范围：la7（SET/GET）→ xj7（BLPOP 超时），含 jp1（LPOP count）、ec3（BLPOP 阻塞）与测试基础设施重构。
 > 最后更新：2026-09-27。
 
 ---
@@ -102,6 +102,50 @@ struct TestCtx {
 上一个 server 进程还没死 → `Server::start()` 报 `:6379 already in use`。
 这个 bug 当场让 26 个测试失败。**教训：资源与锁的 drop 顺序要显式设计。**
 
+### 1.8 `f64` 解析陷阱：`nan` / `inf` 能解析成功，`from_secs_f64` 会 panic
+
+`"nan".parse::<f64>()` 和 `"inf".parse::<f64>()` 都返回 `Ok`，
+但 `Duration::from_secs_f64(NaN)` **会 panic**（`inf` 也一样）。
+
+校验浮点输入用 **`is_finite()`**，一个条件同时挡掉 NaN 和 ±inf：
+
+```rust
+let Ok(secs) = raw.parse::<f64>() else { return Err(...) };
+if !secs.is_finite() || secs < 0.0 {      // 不是 || is_infinite() || is_sign_negative()
+    return Err(...);
+}
+let d = Duration::from_secs_f64(secs);
+```
+
+顺带：`(-0.0f64).is_sign_negative()` 为 `true`，会把 `-0` 误判为负；
+用 `secs < 0.0` 更准（`-0.0 < 0.0` 为 `false`）。
+
+**通用原则**：任何可能 panic 的标准库函数（`from_secs_f64`、切片、`unwrap`、
+窄化转换）在调用前都要做完整校验；尤其别在**持锁路径**上 panic（见 1.4）。
+
+### 1.9 一次性唤醒用 `oneshot`，不要用 `mpsc` / `Notify`
+
+「叫醒某个等待者一次」的需求（如 BLPOP 等 push）用 `tokio::sync::oneshot`：
+
+- `oneshot::channel::<()>() -> (Sender<()>, Receiver<()>)`。
+- `Sender::send(v)` 是**同步**函数（不是 async）——可以在持有
+  `std::sync::Mutex` 时调用，这是它胜任的关键。`Receiver` 实现 `Future`，
+  `await` 得到 `Result<(), RecvError>`。
+- 接收端被 drop（超时/断线）后，`send` 返回 `Err`，发送方能感知并跳过。
+
+为什么不是别的原语：
+
+| 需求 | oneshot | mpsc | Notify |
+|---|---|---|---|
+| 每个等待者醒一次 | ✅ 天然 | 需 N 个 channel | 可以，但 FIFO 不保证 |
+| `send` 同步（可持锁调用） | ✅ | ❌（`send` 是 async） | ✅ |
+| 发送方感知接收方已死 | ✅ `Err` | `await` 得 `Err` | ❌ |
+| 多消费者 | 每等待者一个 | 单消费者 | 多 |
+
+`mpsc` 是「多生产者 → **单消费者** → 多条消息」，方向不对：N 个等待者
+需要 N 个 consumer，只能开 N 个 channel，等价于 N 个 oneshot 还更重。
+`Notify` 不保证 FIFO，也不知道谁被唤醒。
+
 ---
 
 ## 2. RESP 协议
@@ -116,8 +160,10 @@ struct TestCtx {
   由调用方给 `"ERR ..."` / `"WRONGTYPE ..."`。否则 WRONGTYPE 会错成
   `-ERR WRONGTYPE ...`（Redis 是 `-WRONGTYPE ...`）。
 - **binary-safe**：key/value 一律 `Vec<u8>`，不要转 `String`；值里可以含 `\r\n`。
+- **null array 是 `*-1\r\n`**（`Frame::NullArray`），和 `$-1\r\n` 是两回事：
+  `LPOP key`（无 count）在缺失时用 `$-1`；`LPOP key <count>` 在 key 缺失时用 `*-1`。
 - 解析整数参数：`std::str::from_utf8(bytes).ok()?.parse().ok()`（可能非 UTF-8）。
-  负索引用 `i64`，非负可用 `usize`。
+  负索引用 `i64`，非负可用 `usize`；小数（超时秒数）用 `f64`（见 1.8）。
 
 ---
 
@@ -167,6 +213,49 @@ if stop >= len { stop = len - 1; }
 注意：**stop 不夹到 0**。`LRANGE k 0 -6`（长度 5）里 stop 归到 -1，
 `start > stop` → 返回空数组（而不是第一个元素）。
 
+### 3.7 阻塞命令不能是同步 handler
+
+`type Handler = fn(&[Frame], &mut Store) -> Frame` 是同步的，无法 `.await`。
+`BLPOP` 必须等待，所以在**连接循环里特判**（本例放在 `generate_reply`）：
+识别到 `BLPOP` 就 `blpop(...).await`，其余仍走 `execute`。
+
+```rust
+async fn generate_reply(&mut self, f: &Frame) -> Option<Frame> {
+    if let Frame::Array(args) = f {
+        if bulk(args.get(0)) == Some(b"BLPOP") {
+            return Some(blpop(args, self.store.clone()).await);
+        }
+    }
+    let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+    execute(f, &mut store)
+}
+```
+
+备选（更干净、改动更大）：让 `execute` 返回 `enum Reply { Now(Frame),
+Block { keys, timeout } }`，由循环统一 await。命令多了再升级。
+
+### 3.8 等待者队列 + 唤醒（FIFO）
+
+把等待者放进和数据**同一个** mutex 保护的 struct，这样「push 后通知」和
+「检查-注册等待」都原子：
+
+```rust
+struct Db {
+    data: HashMap<Vec<u8>, Entry>,
+    waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
+}
+```
+
+- **注册**：加锁 → 列表为空则把一个 `oneshot::Sender` 放进 `waiters[key]` 尾部
+  → 释放锁 → `await rx`。
+- **唤醒**：`RPUSH` 每入队一个元素，就在持锁状态下从队头弹一个 Sender 并
+  `send(())`；`send` 失败（接收端已死）就继续弹下一个。
+- **FIFO** 来自 `pop_front`：最久等待者先被服务（Redis 语义）。
+- 唤醒后 waiter **重新加锁检查列表**——通知只是「可能有货」，不是交接数据。
+
+**坑**：通知要按**元素个数**发，别一次唤醒所有人，否则被唤醒者发现无货
+又会重新排队、丢失 FIFO 位置。
+
 ---
 
 ## 4. 测试
@@ -188,6 +277,11 @@ if stop >= len { stop = len - 1; }
   ```
 - 别留 `dbg!` / `println!`（污染服务端日志、泄露数据）。
 - 读超时返回「已收到的内容」而不是 hang，失败时能看到有用的 diff。
+- **阻塞命令照样用同步测试**：服务端的 async 不传染给客户端。多开几条连接
+  （`t.connect()`），按「先 BLPOP → `expect_silent` 证明阻塞 → 另一条连接
+  `RPUSH` → 读回唤醒结果」单线程交错即可，不需要 `#[tokio::test]`。
+- **`expect_silent` 兼作「注册顺序」的同步点**：写完 c1 的 BLPOP 先沉默一会儿，
+  确保它入队，再发 c2 的 BLPOP，FIFO 才有确定性。
 
 ---
 
@@ -215,6 +309,11 @@ if stop >= len { stop = len - 1; }
 | `RPUSH k a b c` 返回 push 个数 | 应返回列表**总长度** | 命令语义别凭直觉，照 spec |
 | 新测试在旧实现上也通过 | 断言太弱 / 巧合 | 先验证测试在旧实现上失败 |
 | `cargo test` 混着 `AddrInUse` 却 ok | 残留旧 server 占着端口 | spawn 前探测端口，被占就 panic |
+| `LPOP k 1` 返回 bulk 而非数组 | 用「弹出了几个」决定回复格式 | 该用「有没有给 count」决定（`Option`） |
+| `LPOP k 0` 返回 `$-1` | 同上，且 `0..0` 被当成无结果 | 有 count 一律返回数组（含空数组） |
+| `BLPOP k nan` 把连接打挂 | `"nan"` 能 parse 成 `f64`，`from_secs_f64(NaN)` panic | 浮点先 `is_finite()`，别让库函数 panic |
+| `BLPOP k 1` 只等 1ms | 超时单位是秒，却用了 `from_millis` | 单位写进名字/注释，并写测试锁住 |
+| `BLPOP` 到 string key 永久阻塞 | 类型判断用 `if let Value::List`，String 漏下去注册了等待 | 用 `match`，不匹配的分支明确回错 |
 
 ---
 
@@ -224,4 +323,6 @@ if stop >= len { stop = len - 1; }
 2. **改代码前后都跑测试**，并且让新测试在旧实现上先红。
 3. **不 panic**，尤其在持锁/切片/解析时。
 4. **资源与锁的释放顺序**要显式设计（Rust 是字段声明顺序）。
-5. **写下来的教训才算学到。**
+5. **校验所有外部输入**再调用可能 panic 的 API（`from_secs_f64`、切片、`unwrap`）。
+6. **一次性唤醒用 `oneshot`**；顺序自己用 `VecDeque` 管。
+7. **写下来的教训才算学到。**
