@@ -1,5 +1,5 @@
 use std::{
-    cmp::min, collections::{HashMap, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant},
+    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant},
 };
 
 use bytes::BytesMut;
@@ -405,6 +405,7 @@ struct StreamHandler<S> {
     decoder: Decoder,
     out: BytesMut,
     store: Arc<Mutex<Store>>,
+    subscriptions: HashSet<Vec<u8>>, // per-connection state
 }
 
 impl<S> StreamHandler<S>
@@ -417,6 +418,7 @@ where
             decoder: Decoder::new(),
             out: BytesMut::new(),
             store,
+            subscriptions: HashSet::new(),
         }
     }
 
@@ -449,17 +451,31 @@ where
     }
 
     async fn generate_reply(&mut self, f:&Frame) -> Option<Frame> {
-        
         // check if command is blpop
         if let Frame::Array(args) = f {
             if let Some(cmd) = bulk(args.get(0)) {
                 if &cmd == b"BLPOP" {
                     return Some(blpop(args, self.store.clone()).await);
                 }
+                if &cmd == b"SUBSCRIBE" {
+                    return Some(self.subscribe(args));
+                }
             }
         }
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         execute(f, &mut store)
+    }
+
+    fn subscribe(&mut self, args:&[Frame]) -> Frame {
+        let Some(ch) = bulk(args.get(1)) else {
+            return Frame::Err("ERR wrong number of arguments for 'subscribe' command".into());
+        };
+        self.subscriptions.insert(ch.to_vec());
+        Frame::Array(vec![
+            Frame::bulk("subscribe"),
+            Frame::bulk(ch),
+            Frame::Int(self.subscriptions.len() as i64)
+        ])
     }
 }
 

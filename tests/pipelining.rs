@@ -1064,3 +1064,17 @@ fn blpop_err_with_negative_timeout() {
     t.client.cmd(&[b"BLPOP", b"k", b"-0.5"])
         .expect(b"-ERR value is out of range, must be positive\r\n");
 }
+
+#[test]
+fn subscribe_key_returns_length() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SUBSCRIBE",b"k"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$1\r\nk\r\n:1\r\n");
+}
+
+#[test]
+fn subscribe_without_key_returns_error() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SUBSCRIBE"])
+        .expect(b"-ERR wrong number of arguments for 'subscribe' command\r\n");
+}
