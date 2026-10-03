@@ -1154,7 +1154,26 @@ fn subscribe_then_ping_returns_pong() {
         .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
     t.client
         .cmd(&[b"PING"])
-        .expect(b"+PONG\r\n");
+        .expect(b"*2\r\n$4\r\npong\r\n$0\r\n\r\n");
+}
+
+/// In subscribed mode, PING echoes the optional message as the 2nd element.
+#[test]
+fn subscribed_ping_echoes_message() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"PING", b"hello"])
+        .expect(b"*2\r\n$4\r\npong\r\n$5\r\nhello\r\n");
+}
+
+/// A client that is not subscribed still gets the plain +PONG.
+#[test]
+fn unsubscribed_ping_returns_pong() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"PING"]).expect(b"+PONG\r\n");
 }
 
 /// SET is rejected in subscribed mode (and the command name is lowercased).

@@ -462,10 +462,17 @@ where
                     ))]
                 }
 
-                if &cmd == b"BLPOP" {
+                if !self.subscriptions.is_empty() {
+                    if cmd == b"PING" {
+                        let msg = bulk(args.get(1)).unwrap_or(b"");
+                        return vec![Frame::Array(vec![Frame::bulk("pong"), Frame::bulk(msg)])];
+                    }
+                }
+
+                if cmd == b"BLPOP" {
                     return vec![blpop(args, self.store.clone()).await];
                 }
-                if &cmd == b"SUBSCRIBE" {
+                if cmd == b"SUBSCRIBE" {
                     return self.subscribe(args);
                 }
             }
