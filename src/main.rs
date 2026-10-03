@@ -442,40 +442,47 @@ where
     /// instead of silently swallowing it.
     async fn respond(&mut self, val: Frame) -> io::Result<()> {
         let reply = self.generate_reply(&val).await;
-        if let Some(reply) = reply {
+        for f in reply {
             self.out.clear();
-            reply.encode(&mut self.out);
+            f.encode(&mut self.out);
             self.stream.write_all(&self.out).await?;
         }
         Ok(())
     }
 
-    async fn generate_reply(&mut self, f:&Frame) -> Option<Frame> {
+    async fn generate_reply(&mut self, f:&Frame) -> Vec<Frame> {
         // check if command is blpop
         if let Frame::Array(args) = f {
             if let Some(cmd) = bulk(args.get(0)) {
                 if &cmd == b"BLPOP" {
-                    return Some(blpop(args, self.store.clone()).await);
+                    return vec![blpop(args, self.store.clone()).await];
                 }
                 if &cmd == b"SUBSCRIBE" {
-                    return Some(self.subscribe(args));
+                    return self.subscribe(args);
                 }
             }
         }
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        execute(f, &mut store)
+        execute(f, &mut store).into_iter().collect()
     }
 
-    fn subscribe(&mut self, args:&[Frame]) -> Frame {
-        let Some(ch) = bulk(args.get(1)) else {
-            return Frame::Err("ERR wrong number of arguments for 'subscribe' command".into());
-        };
-        self.subscriptions.insert(ch.to_vec());
-        Frame::Array(vec![
-            Frame::bulk("subscribe"),
-            Frame::bulk(ch),
-            Frame::Int(self.subscriptions.len() as i64)
-        ])
+    fn subscribe(&mut self, args:&[Frame]) -> Vec<Frame> {
+        let channels = &args[1..];
+        if channels.is_empty() {
+            return vec![Frame::Err("ERR wrong number of arguments for 'subscribe' command".into())];
+        }
+        channels.iter()
+            .filter_map(|c|bulk(Some(c)))
+            .map(|ch| {
+                self.subscriptions.insert(ch.to_vec());
+                Frame::Array(vec![
+                    Frame::bulk("subscribe"),
+                    Frame::bulk(ch),
+                    Frame::Int(self.subscriptions.len() as i64)
+                ])
+            })
+            .collect()
+        
     }
 }
 

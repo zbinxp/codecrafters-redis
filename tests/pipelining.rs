@@ -130,10 +130,11 @@ impl Client {
     }
 
     /// Read at least `expected.len()` bytes and assert equality.
-    fn expect(&mut self, expected: &[u8]) {
+    fn expect(&mut self, expected: &[u8]) -> &mut Self {
         let got = read_at_least(&mut self.0, expected.len(), TIMEOUT);
         dbg!(String::from_utf8_lossy(&got));
         assert_eq!(got.as_slice(), expected);
+        self
     }
 
     /// Read at least `prefix.len()` bytes and assert the reply starts with it.
@@ -1077,4 +1078,50 @@ fn subscribe_without_key_returns_error() {
     let mut t = TestCtx::new();
     t.client.cmd(&[b"SUBSCRIBE"])
         .expect(b"-ERR wrong number of arguments for 'subscribe' command\r\n");
+}
+
+#[test]
+fn subscribe_multiple_channels_returns_multiple_array() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE",b"a", b"b"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$1\r\na\r\n:1\r\n")
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$1\r\nb\r\n:2\r\n");
+}
+
+/// Subscribing to more channels across separate commands increments the count.
+#[test]
+fn subscribe_multiple_commands_increment_count() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+}
+
+/// Re-subscribing to the same channel does not change the count.
+#[test]
+fn subscribe_same_channel_does_not_increment() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+}
+
+/// Subscription counts are per-connection.
+#[test]
+fn subscriptions_are_per_client() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    other
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
 }
