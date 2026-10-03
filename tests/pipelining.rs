@@ -1125,3 +1125,93 @@ fn subscriptions_are_per_client() {
         .cmd(&[b"SUBSCRIBE", b"bar"])
         .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
 }
+
+/// The exact single-line error Redis returns for a disallowed command in
+/// subscribed mode (must contain no CR/LF except the terminator).
+fn subscribe_mode_error(name: &str) -> Vec<u8> {
+    format!(
+        "-ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn subscribe_then_echo_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"ECHO", b"hey"])
+        .expect(&subscribe_mode_error("echo"));
+}
+
+#[test]
+fn subscribe_then_ping_returns_pong() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"PING"])
+        .expect(b"+PONG\r\n");
+}
+
+/// SET is rejected in subscribed mode (and the command name is lowercased).
+#[test]
+fn subscribe_mode_rejects_set() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SET", b"k", b"v"])
+        .expect(&subscribe_mode_error("set"));
+}
+
+/// GET is rejected in subscribed mode.
+#[test]
+fn subscribe_mode_rejects_get() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"GET", b"k"])
+        .expect(&subscribe_mode_error("get"));
+}
+
+/// SUBSCRIBE remains allowed once in subscribed mode.
+#[test]
+fn subscribe_mode_allows_further_subscribe() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+}
+
+/// Commands are unrestricted before any subscription (guards against a global
+/// flag instead of per-connection state).
+#[test]
+fn commands_work_before_subscribe() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ECHO", b"hey"])
+        .expect(b"$3\r\nhey\r\n");
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$1\r\nv\r\n");
+}
+
+/// The restriction is per-connection: another client is unaffected.
+#[test]
+fn subscribed_mode_is_per_connection() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    other.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+}

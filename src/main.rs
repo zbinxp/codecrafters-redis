@@ -454,6 +454,14 @@ where
         // check if command is blpop
         if let Frame::Array(args) = f {
             if let Some(cmd) = bulk(args.get(0)) {
+                // subscribe mode check
+                if !self.subscriptions.is_empty() && !allowed_in_subscribe_mode(cmd) {
+                    let name = String::from_utf8_lossy(cmd).to_lowercase();
+                    return vec![Frame::Err(format!(
+                        "ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+                    ))]
+                }
+
                 if &cmd == b"BLPOP" {
                     return vec![blpop(args, self.store.clone()).await];
                 }
@@ -484,6 +492,14 @@ where
             .collect()
         
     }
+}
+
+fn allowed_in_subscribe_mode(cmd: &[u8]) -> bool {
+    const ALLOWED: &[&[u8]] = &[
+        b"SUBSCRIBE", b"UNSUBSCRIBE", b"PSUBSCRIBE", b"PUNSUBSCRIBE",
+        b"PING", b"QUIT", b"RESET"
+    ];
+    ALLOWED.iter().any(|a|cmd.eq_ignore_ascii_case(a))
 }
 
 #[tokio::main]
