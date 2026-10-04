@@ -1,13 +1,10 @@
 use std::{
-    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant},
+    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant}, vec,
 };
 
 use bytes::BytesMut;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpListener,
-    sync::oneshot,
-    time::sleep
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf}, net::TcpListener, sync::{mpsc::{self, UnboundedSender}, oneshot}, time::sleep
 };
 
 mod resp;
@@ -41,13 +38,15 @@ enum Value {
 struct Db {
     data: HashMap<Vec<u8>, Entry>,
     waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
+    channel_subscribers: HashMap<Vec<u8>, Vec<Outbox>>,
 }
 
 impl Db {
     fn new() -> Self {
         Self {
             data: HashMap::new(),
-            waiters: HashMap::new()
+            waiters: HashMap::new(),
+            channel_subscribers: HashMap::new()
         }
     }
 }
@@ -56,6 +55,7 @@ impl Db {
 /// name) and produces a reply.
 type Handler = fn(&[Frame], &mut Store) -> Frame;
 type Store = Db;
+type Outbox = mpsc::UnboundedSender<Frame>;
 
 fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
     Frame::simple("PONG")
@@ -307,6 +307,22 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
     }
 }
 
+/// PUBLISH channel message just returns the number of clients
+/// subscribed to that channel
+fn cmd_publish(args: &[Frame], store: &mut Store) -> Frame {
+    let (Some(channel), Some(_msg)) = (bulk(args.get(1)), bulk(args.get(2))) else {
+        return Frame::Err("ERR wrong number of arguments for 'publish' command".into());
+    };
+    let n = store.channel_subscribers.get(channel)
+        .unwrap_or(&Vec::new())
+        .iter().filter_map(|sender| {
+            sender.send(Frame::array(vec![b"message", channel, _msg])).ok()
+        })
+        .count();
+    Frame::Int(n as i64)
+}
+
+
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
 /// xj7: Spec: BLPOP key <timeout> where the timeout can be fractional seconds
 async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
@@ -370,6 +386,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"LRANGE" => Some(cmd_lrange),
         b"LLEN" => Some(cmd_llen),
         b"LPOP" => Some(cmd_lpop),
+        b"PUBLISH" => Some(cmd_publish),
         _ => None,
     }
 }
@@ -401,24 +418,25 @@ fn execute(req: &Frame, store: &mut Store) -> Option<Frame> {
 /// (dependency inversion). The read side decodes via [`Decoder`]; the write side
 /// reuses a single output buffer across replies.
 struct StreamHandler<S> {
-    stream: S,
+    reader: ReadHalf<S>,
     decoder: Decoder,
-    out: BytesMut,
+    // out: BytesMut,
     store: Arc<Mutex<Store>>,
     subscriptions: HashSet<Vec<u8>>, // per-connection state
+    out_tx: Outbox,
 }
 
 impl<S> StreamHandler<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
+where S: AsyncRead + AsyncWrite + Unpin
 {
-    fn new(stream: S, store: Arc<Mutex<Store>>) -> Self {
+    fn new(reader: ReadHalf<S>, store: Arc<Mutex<Store>>, tx: UnboundedSender<Frame>) -> Self {
         StreamHandler {
-            stream,
+            reader,
             decoder: Decoder::new(),
-            out: BytesMut::new(),
+            // out: BytesMut::new(),
             store,
             subscriptions: HashSet::new(),
+            out_tx: tx,
         }
     }
 
@@ -429,7 +447,7 @@ where
             if let Some(frame) = self.decoder.parse() {
                 return Some(frame);
             }
-            match self.stream.read(&mut chunk).await {
+            match self.reader.read(&mut chunk).await {
                 Ok(0) | Err(_) => return None,
                 Ok(n) => self.decoder.extend(&chunk[..n]),
             }
@@ -443,9 +461,7 @@ where
     async fn respond(&mut self, val: Frame) -> io::Result<()> {
         let reply = self.generate_reply(&val).await;
         for f in reply {
-            self.out.clear();
-            f.encode(&mut self.out);
-            self.stream.write_all(&self.out).await?;
+            self.out_tx.send(f).map_err(|e|io::Error::other(e.to_string()))?;
         }
         Ok(())
     }
@@ -486,10 +502,21 @@ where
         if channels.is_empty() {
             return vec![Frame::Err("ERR wrong number of arguments for 'subscribe' command".into())];
         }
+        // let mut n = 0;
         channels.iter()
             .filter_map(|c|bulk(Some(c)))
             .map(|ch| {
-                self.subscriptions.insert(ch.to_vec());
+                // n += 1;
+                // self.out_tx.send(Frame::Array(vec![Frame::bulk("subscribe"), Frame::bulk(ch), Frame::Int(n)]));
+
+                // for newly created channel
+                let newly = self.subscriptions.insert(ch.to_vec());
+                if newly {
+                    let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                    // register tx to channel_subscribers
+                    store.channel_subscribers.entry(ch.to_vec())
+                        .or_default().push(self.out_tx.clone());
+                }
                 Frame::Array(vec![
                     Frame::bulk("subscribe"),
                     Frame::bulk(ch),
@@ -514,12 +541,25 @@ async fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     let store = Arc::new(Mutex::new(Store::new()));
     loop {
-        let Ok((s, _)) = listener.accept().await else {
+        let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
+
+        let (rd, mut wr) = tokio::io::split(stream);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+        tokio::spawn(async move {
+            let mut buf = BytesMut::new();
+            while let Some(frame) = out_rx.recv().await {
+                buf.clear();
+                frame.encode(&mut buf);
+                if wr.write_all(&buf).await.is_err() { break; }
+            }
+        });
+
+
         let store_clone = Arc::clone(&store);
         tokio::spawn(async move {
-            let mut handler = StreamHandler::new(s, store_clone);
+            let mut handler = StreamHandler::new(rd, store_clone, out_tx);
             while let Some(val) = handler.next().await {
                 if handler.respond(val).await.is_err() {
                     break;

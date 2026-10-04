@@ -72,6 +72,10 @@ impl Frame {
     pub fn simple(data: impl AsRef<[u8]>) -> Self {
         Self::SimpleString(data.as_ref().to_vec())
     }
+
+    pub fn array(data: Vec<impl AsRef<[u8]>>) -> Self {
+        Self::Array(data.into_iter().map(|d| Frame::bulk(d)).collect())
+    }
 }
 
 

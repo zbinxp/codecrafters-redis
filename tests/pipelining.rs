@@ -109,11 +109,21 @@ impl TestCtx {
 }
 
 /// A connected client with RESP helpers, so tests read as command/expect pairs.
-struct Client(TcpStream);
+///
+/// Incoming bytes are buffered so `expect` consumes exactly the bytes it
+/// asserts and keeps any remainder for the next call. Without buffering, one
+/// `read` returning two frames would break a chained `expect`.
+struct Client {
+    stream: TcpStream,
+    buf: Vec<u8>,
+}
 
 impl Client {
     fn connect() -> Self {
-        Client(TcpStream::connect(ADDR).expect("failed to connect"))
+        Client {
+            stream: TcpStream::connect(ADDR).expect("failed to connect"),
+            buf: Vec::new(),
+        }
     }
 
     /// Send `args` as a RESP array of bulk strings.
@@ -125,69 +135,97 @@ impl Client {
 
     /// Write raw bytes (pipelining / split-command tests).
     fn raw(&mut self, bytes: &[u8]) -> &mut Self {
-        self.0.write_all(bytes).expect("failed to write");
+        self.stream.write_all(bytes).expect("failed to write");
         self
     }
 
-    /// Read at least `expected.len()` bytes and assert equality.
-    fn expect(&mut self, expected: &[u8]) -> &mut Self {
-        let got = read_at_least(&mut self.0, expected.len(), TIMEOUT);
-        dbg!(String::from_utf8_lossy(&got));
-        assert_eq!(got.as_slice(), expected);
-        self
-    }
-
-    /// Read at least `prefix.len()` bytes and assert the reply starts with it.
-    fn expect_prefix(&mut self, prefix: &[u8]) {
-        let got = read_at_least(&mut self.0, prefix.len(), TIMEOUT);
-        assert!(
-            got.starts_with(prefix),
-            "expected a reply starting with {prefix:?}, got {got:?}"
-        );
-    }
-
-    /// Assert nothing arrives within `timeout`.
-    fn expect_silent(&mut self, timeout: Duration) {
-        assert_silent(&mut self.0, timeout);
-    }
-}
-
-/// Read until at least `want` bytes have arrived, or `timeout` elapses.
-/// A timeout is not an error here: returning what we got lets a failing test
-/// show a useful diff instead of hanging forever.
-fn read_at_least(stream: &mut TcpStream, want: usize, timeout: Duration) -> Vec<u8> {
-    stream
-        .set_read_timeout(Some(timeout))
-        .expect("failed to set read timeout");
-
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 512];
-    while got.len() < want {
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&chunk[..n]),
-            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => break,
-            Err(e) => panic!("read failed: {e}"),
+    /// Read until at least `want` bytes are buffered, or `timeout` elapses.
+    fn fill_at_least(&mut self, want: usize, timeout: Duration) {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .expect("failed to set read timeout");
+        let mut chunk = [0u8; 512];
+        while self.buf.len() < want {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    break
+                }
+                Err(e) => panic!("read failed: {e}"),
+            }
         }
     }
-    got
-}
 
-/// Assert the server sends nothing at all within `timeout`.
-fn assert_silent(stream: &mut TcpStream, timeout: Duration) {
-    stream
-        .set_read_timeout(Some(timeout))
-        .expect("failed to set read timeout");
+    /// Read until the buffer contains a `\r\n`, or `timeout` elapses.
+    fn fill_line(&mut self, timeout: Duration) {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .expect("failed to set read timeout");
+        let mut chunk = [0u8; 512];
+        while !self.buf.windows(2).any(|w| w == b"\r\n") {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    break
+                }
+                Err(e) => panic!("read failed: {e}"),
+            }
+        }
+    }
 
-    let mut chunk = [0u8; 64];
-    match stream.read(&mut chunk) {
-        Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
-        Ok(0) => panic!("server closed the connection"),
-        Ok(n) => panic!(
-            "server answered an incomplete command with {:?}",
-            String::from_utf8_lossy(&chunk[..n])
-        ),
-        Err(e) => panic!("read failed: {e}"),
+    /// Assert the next `expected.len()` bytes equal `expected`; consume them.
+    fn expect(&mut self, expected: &[u8]) -> &mut Self {
+        self.fill_at_least(expected.len(), TIMEOUT);
+        assert!(
+            self.buf.len() >= expected.len() && &self.buf[..expected.len()] == expected,
+            "expected {expected:?}, buffered {:?}",
+            String::from_utf8_lossy(&self.buf)
+        );
+        self.buf.drain(..expected.len());
+        self
+    }
+
+    /// Assert the next line starts with `prefix`; consume the whole line.
+    fn expect_prefix(&mut self, prefix: &[u8]) {
+        self.fill_line(TIMEOUT);
+        let end = self
+            .buf
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| p + 2)
+            .expect("no complete line arrived");
+        let line = &self.buf[..end];
+        assert!(
+            line.starts_with(prefix),
+            "expected a reply starting with {prefix:?}, got {:?}",
+            String::from_utf8_lossy(line)
+        );
+        self.buf.drain(..end);
+    }
+
+    /// Assert nothing is buffered and nothing arrives within `timeout`.
+    fn expect_silent(&mut self, timeout: Duration) {
+        if !self.buf.is_empty() {
+            panic!(
+                "server sent unexpected bytes: {:?}",
+                String::from_utf8_lossy(&self.buf)
+            );
+        }
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .expect("failed to set read timeout");
+        let mut chunk = [0u8; 64];
+        match self.stream.read(&mut chunk) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Ok(0) => panic!("server closed the connection"),
+            Ok(n) => panic!(
+                "server sent unexpected bytes: {:?}",
+                String::from_utf8_lossy(&chunk[..n])
+            ),
+            Err(e) => panic!("read failed: {e}"),
+        }
     }
 }
 
@@ -1233,4 +1271,142 @@ fn subscribed_mode_is_per_connection() {
         .cmd(&[b"SUBSCRIBE", b"foo"])
         .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
     other.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+}
+
+#[test]
+fn publish_nope_key_with_msg_return_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"PUBLISH", b"nope", b"msg"])
+        .expect(b":0\r\n");
+}
+
+/// PUBLISH returns the number of subscribers of the channel.
+#[test]
+fn publish_counts_one_subscriber() {
+    let mut t = TestCtx::new();
+    let mut publisher = t.connect();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    publisher
+        .cmd(&[b"PUBLISH", b"foo", b"msg"])
+        .expect(b":1\r\n");
+}
+
+/// The count is per-channel across all connections.
+#[test]
+fn publish_counts_all_subscribers_of_the_channel() {
+    let mut t = TestCtx::new();
+    let mut c2 = t.connect();
+    let mut c3 = t.connect();
+    let mut publisher = t.connect();
+
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    c2.cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+    c3.cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+
+    publisher
+        .cmd(&[b"PUBLISH", b"bar", b"msg"])
+        .expect(b":2\r\n");
+    publisher
+        .cmd(&[b"PUBLISH", b"foo", b"msg"])
+        .expect(b":1\r\n");
+}
+
+/// Re-subscribing the same client must not double-count.
+#[test]
+fn publish_after_duplicate_subscribe_counts_once() {
+    let mut t = TestCtx::new();
+    let mut publisher = t.connect();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+    publisher
+        .cmd(&[b"PUBLISH", b"bar", b"msg"])
+        .expect(b":1\r\n");
+}
+
+/// PUBLISH needs both a channel and a message.
+#[test]
+fn publish_without_message_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"PUBLISH", b"foo"])
+        .expect(b"-ERR wrong number of arguments for 'publish' command\r\n");
+}
+
+#[test]
+fn subscribe_then_publish_sub_receives_message(){
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE",b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    let mut t2 = t.connect();
+    t2.cmd(&[b"PUBLISH", b"foo", b"hello"])
+        .expect(b":1\r\n");
+    t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nhello\r\n");
+}
+
+/// Every subscriber of a channel receives the published message.
+#[test]
+fn publish_delivers_to_all_subscribers() {
+    let mut t = TestCtx::new();
+    let mut c2 = t.connect();
+    let mut publisher = t.connect();
+
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    c2.cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    publisher.cmd(&[b"PUBLISH", b"foo", b"hi"]).expect(b":2\r\n");
+
+    let expected: &[u8] = b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$2\r\nhi\r\n";
+    t.client.expect(expected);
+    c2.expect(expected);
+}
+
+/// A subscriber of a different channel receives nothing.
+#[test]
+fn publish_does_not_deliver_to_other_channels() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    let mut publisher = t.connect();
+
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    other.cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+
+    publisher.cmd(&[b"PUBLISH", b"foo", b"hi"]).expect(b":1\r\n");
+
+    t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$2\r\nhi\r\n");
+    other.expect_silent(Duration::from_millis(200));
+}
+
+/// Multiple messages arrive in publish order.
+#[test]
+fn publish_delivers_messages_in_order() {
+    let mut t = TestCtx::new();
+    let mut publisher = t.connect();
+
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    publisher.cmd(&[b"PUBLISH", b"foo", b"one"]).expect(b":1\r\n");
+    publisher.cmd(&[b"PUBLISH", b"foo", b"two"]).expect(b":1\r\n");
+
+    t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\none\r\n");
+    t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\ntwo\r\n");
 }
