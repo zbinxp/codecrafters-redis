@@ -1410,3 +1410,95 @@ fn publish_delivers_messages_in_order() {
     t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\none\r\n");
     t.client.expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\ntwo\r\n");
 }
+
+#[test]
+fn sub_two_channels_then_unsub_returns_length() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:0\r\n");
+}
+
+/// After unsubscribing, the channel is no longer delivered, but other
+/// channels the client is still subscribed to keep working.
+#[test]
+fn unsubscribe_stops_delivery_but_keeps_other_channels() {
+    let mut t = TestCtx::new();
+    let mut publisher = t.connect();
+
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"baz"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nbaz\r\n:2\r\n");
+
+    publisher.cmd(&[b"PUBLISH", b"foo", b"pre"]).expect(b":1\r\n");
+    t.client
+        .expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\npre\r\n");
+
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    // foo is no longer delivered (and no longer counted)
+    publisher.cmd(&[b"PUBLISH", b"foo", b"post"]).expect(b":0\r\n");
+    t.client.expect_silent(Duration::from_millis(200));
+
+    // baz still is
+    publisher.cmd(&[b"PUBLISH", b"baz", b"hi"]).expect(b":1\r\n");
+    t.client
+        .expect(b"*3\r\n$7\r\nmessage\r\n$3\r\nbaz\r\n$2\r\nhi\r\n");
+}
+
+/// Unsubscribing from a channel you never subscribed to is a no-op that
+/// still replies, without changing the count.
+#[test]
+fn unsubscribe_from_unsubscribed_channel_keeps_count() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"bar"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:0\r\n");
+}
+
+/// Removing the last channel exits subscribed mode: normal commands work again.
+#[test]
+fn unsubscribe_last_channel_leaves_subscribed_mode() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"foo"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:0\r\n");
+    t.client.cmd(&[b"ECHO", b"hey"]).expect(b"$3\r\nhey\r\n");
+}
+
+/// One UNSUBSCRIBE can name several channels, one reply each.
+#[test]
+fn unsubscribe_multiple_channels_in_one_command() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SUBSCRIBE", b"a", b"b"])
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$1\r\na\r\n:1\r\n")
+        .expect(b"*3\r\n$9\r\nsubscribe\r\n$1\r\nb\r\n:2\r\n");
+    t.client
+        .cmd(&[b"UNSUBSCRIBE", b"a", b"b"])
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$1\r\na\r\n:1\r\n")
+        .expect(b"*3\r\n$11\r\nunsubscribe\r\n$1\r\nb\r\n:0\r\n");
+}

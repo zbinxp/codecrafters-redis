@@ -1,5 +1,5 @@
 use std::{
-    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex}, time::{Duration, Instant}, vec,
+    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
 };
 
 use bytes::BytesMut;
@@ -14,6 +14,9 @@ const WRONGTYPE_KEY_WRONG: &str =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
 const ERR_NOT_VALID_INDEX: &str = "ERR value is not an integer or out of range";
 const ERR_VALUE_OUT_OF_RANGE: &str = "ERR value is out of range, must be positive";
+
+ // one global counter
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// the value type in our Store
 struct Entry {
@@ -38,7 +41,7 @@ enum Value {
 struct Db {
     data: HashMap<Vec<u8>, Entry>,
     waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
-    channel_subscribers: HashMap<Vec<u8>, Vec<Outbox>>,
+    channel_subscribers: HashMap<Vec<u8>, HashMap<u64,Outbox>>,
 }
 
 impl Db {
@@ -314,8 +317,8 @@ fn cmd_publish(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err("ERR wrong number of arguments for 'publish' command".into());
     };
     let n = store.channel_subscribers.get(channel)
-        .unwrap_or(&Vec::new())
-        .iter().filter_map(|sender| {
+        .unwrap_or(&HashMap::new())
+        .iter().filter_map(|(_conn_id, sender)| {
             sender.send(Frame::array(vec![b"message", channel, _msg])).ok()
         })
         .count();
@@ -424,6 +427,7 @@ struct StreamHandler<S> {
     store: Arc<Mutex<Store>>,
     subscriptions: HashSet<Vec<u8>>, // per-connection state
     out_tx: Outbox,
+    conn_id: u64,
 }
 
 impl<S> StreamHandler<S>
@@ -437,6 +441,7 @@ where S: AsyncRead + AsyncWrite + Unpin
             store,
             subscriptions: HashSet::new(),
             out_tx: tx,
+            conn_id: NEXT_CONN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -491,6 +496,9 @@ where S: AsyncRead + AsyncWrite + Unpin
                 if cmd == b"SUBSCRIBE" {
                     return self.subscribe(args);
                 }
+                if cmd == b"UNSUBSCRIBE" {
+                    return self.unsubscribe(args);
+                }
             }
         }
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -515,7 +523,7 @@ where S: AsyncRead + AsyncWrite + Unpin
                     let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
                     // register tx to channel_subscribers
                     store.channel_subscribers.entry(ch.to_vec())
-                        .or_default().push(self.out_tx.clone());
+                        .or_default().insert(self.conn_id, self.out_tx.clone());
                 }
                 Frame::Array(vec![
                     Frame::bulk("subscribe"),
@@ -525,6 +533,34 @@ where S: AsyncRead + AsyncWrite + Unpin
             })
             .collect()
         
+    }
+
+
+    fn unsubscribe(&mut self, args:&[Frame]) -> Vec<Frame> {
+        let channels = &args[1..];
+        if channels.is_empty() {
+            return vec![Frame::Err("ERR wrong number of arguments for 'unsubscribe' command".into())];
+        }
+
+        channels.iter()
+            .filter_map(|c| bulk(Some(c)))
+            .map(|ch| {
+                if self.subscriptions.remove(ch) {
+                    let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                    if let Some(subs) = store.channel_subscribers.get_mut(ch) {
+                        subs.remove(&self.conn_id);
+                        if subs.is_empty() {
+                            store.channel_subscribers.remove(ch);
+                        }
+                    }
+                }
+
+                Frame::Array(vec![
+                    Frame::bulk(b"unsubscribe"), 
+                    Frame::bulk(ch), 
+                    Frame::Int(self.subscriptions.len() as i64)])
+            })
+            .collect()
     }
 }
 
