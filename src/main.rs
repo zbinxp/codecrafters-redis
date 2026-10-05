@@ -1,5 +1,5 @@
 use std::{
-    cmp::min, collections::{HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
+    cmp::{Ordering, min}, collections::{BTreeSet, HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
 };
 
 use bytes::BytesMut;
@@ -36,6 +36,7 @@ impl Entry {
 enum Value {
     String(Vec<u8>),
     List(VecDeque<Vec<u8>>),
+    ZSet(BTreeSet<ZEntry>)
 }
 
 struct Db {
@@ -54,11 +55,32 @@ impl Db {
     }
 }
 
+
+struct Score(f64);
+
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        return self.0.total_cmp(&other.0);
+    }
+}
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0) == Ordering::Equal
+    }
+}
+impl Eq for Score {}
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// A command handler receives the full argument list (index 0 is the command
 /// name) and produces a reply.
 type Handler = fn(&[Frame], &mut Store) -> Frame;
 type Store = Db;
 type Outbox = mpsc::UnboundedSender<Frame>;
+type ZEntry = (Score, Vec<u8>);
 
 fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
     Frame::simple("PONG")
@@ -84,8 +106,8 @@ fn cmd_get(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Null;
     };
     match &entry.value {
-        Value::List(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
-        Value::String(val) => Frame::bulk(val)
+        Value::String(val) => Frame::bulk(val),
+        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
     }
 }
 
@@ -258,7 +280,7 @@ fn cmd_llen(args: &[Frame], store: &mut Store) -> Frame {
 
     match &entry.value {
         Value::List(list) => Frame::Int(list.len() as i64),
-        Value::String(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into())
     }
 }
 
@@ -306,7 +328,7 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
                 }
             }          
         },
-        Value::String(_) => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into())
     }
 }
 
@@ -325,6 +347,36 @@ fn cmd_publish(args: &[Frame], store: &mut Store) -> Frame {
     Frame::Int(n as i64)
 }
 
+/// Spec: ZADD key score member creates the set if absent and adds member with score, returning
+/// the number of new members (:1 here). Scores are 64-bit floats; sets are ordered by
+/// ascending score (ties broken by member).
+fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 4 {
+        return Frame::Err("ERR wrong number of arguments for 'zadd' command".into());
+    }
+
+    let (Some(key), Some(score), Some(member)) = (
+        bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3))
+    ) else{
+        return Frame::Err("ERR wrong number of arguments for 'zadd' command".into());
+    };
+    let Some(val) = parse_f64(score) else {
+        return Frame::Err("ERR value is not a valid float".into());
+    };
+    if val.is_nan() {
+        return Frame::Err("ERR value is not a valid float".into());
+    }
+    live_entry(store, key);
+
+    let entry = store.data.entry(key.to_vec())
+        .or_insert_with(|| Entry::new(Value::ZSet(BTreeSet::new())));
+    
+    let Value::ZSet(tree) = &mut entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    let added = tree.insert((Score(val), member.to_vec()));
+    Frame::Int(added as i64)
+}
 
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
 /// xj7: Spec: BLPOP key <timeout> where the timeout can be fractional seconds
@@ -390,6 +442,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"LLEN" => Some(cmd_llen),
         b"LPOP" => Some(cmd_lpop),
         b"PUBLISH" => Some(cmd_publish),
+        b"ZADD" => Some(cmd_zadd),
         _ => None,
     }
 }

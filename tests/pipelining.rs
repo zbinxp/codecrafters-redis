@@ -1502,3 +1502,63 @@ fn unsubscribe_multiple_channels_in_one_command() {
         .expect(b"*3\r\n$11\r\nunsubscribe\r\n$1\r\na\r\n:1\r\n")
         .expect(b"*3\r\n$11\r\nunsubscribe\r\n$1\r\nb\r\n:0\r\n");
 }
+
+#[test]
+fn zadd_key_score_member_returns_count() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD",b"z", b"10.0", b"m"])
+        .expect(b":1\r\n");
+}
+
+/// A non-float score is rejected.
+#[test]
+fn zadd_non_float_score_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"notanumber", b"m"])
+        .expect(b"-ERR value is not a valid float\r\n");
+}
+
+/// NaN is not a valid score (Redis rejects it; it must not be stored).
+#[test]
+fn zadd_nan_score_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"nan", b"m"])
+        .expect(b"-ERR value is not a valid float\r\n");
+}
+
+/// ZADD needs key, score and member.
+#[test]
+fn zadd_missing_member_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"1.0"])
+        .expect(b"-ERR wrong number of arguments for 'zadd' command\r\n");
+}
+
+/// ZADD against a string key is WRONGTYPE.
+#[test]
+fn zadd_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"ZADD", b"s", b"1.0", b"m"])
+        .expect(WRONGTYPE);
+}
+
+/// An expired key is treated as absent: ZADD creates a fresh sorted set.
+#[test]
+fn zadd_on_expired_key_creates_new_set() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+
+    sleep(Duration::from_millis(200));
+
+    t.client
+        .cmd(&[b"ZADD", b"k", b"1.0", b"m"])
+        .expect(b":1\r\n");
+}
