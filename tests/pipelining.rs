@@ -1562,3 +1562,14 @@ fn zadd_on_expired_key_creates_new_set() {
         .cmd(&[b"ZADD", b"k", b"1.0", b"m"])
         .expect(b":1\r\n");
 }
+
+#[test]
+fn zadd_update_score_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD",b"z", b"10.0", b"m"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZADD", b"z", b"8.0", b"m"])
+        .expect(b":0\r\n");
+}

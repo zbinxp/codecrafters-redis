@@ -55,7 +55,7 @@ impl Db {
     }
 }
 
-
+#[derive(Clone)]
 struct Score(f64);
 
 impl Ord for Score {
@@ -374,8 +374,10 @@ fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
     let Value::ZSet(tree) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
-    let added = tree.insert((Score(val), member.to_vec()));
-    Frame::Int(added as i64)
+    // check existance
+    let existed = tree.extract_if(.., |(_,m)| m==member).next().is_some();
+    tree.insert((Score(val), member.to_vec()));
+    Frame::Int(!existed as i64)
 }
 
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
