@@ -1812,3 +1812,69 @@ fn zrange_mixed_positive_negative() {
         .cmd(&[b"ZRANGE", b"zset_key", b"2", b"-1"])
         .expect(b"*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
 }
+
+#[test]
+fn zcard_return_count() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"zset_key", b"20.0", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"30.1", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"40.2", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"25.0", b"paz"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZCARD", b"zset_key"])
+        .expect(b":4\r\n");
+}
+
+/// Updating a member's score must not change the cardinality (hf1 regression).
+#[test]
+fn zcard_unchanged_after_score_update() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"1.0", b"a"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"2.0", b"b"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"100.0", b"a"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"ZCARD", b"z"]).expect(b":2\r\n");
+}
+
+/// A missing key has cardinality 0.
+#[test]
+fn zcard_missing_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZCARD", b"missing"]).expect(b":0\r\n");
+}
+
+/// ZCARD against a string key is WRONGTYPE.
+#[test]
+fn zcard_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"ZCARD", b"s"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so ZCARD returns 0.
+#[test]
+fn zcard_expired_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"ZCARD", b"k"]).expect(b":0\r\n");
+}
+
+/// ZCARD takes exactly one key.
+#[test]
+fn zcard_with_extra_args_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZCARD", b"z", b"extra"])
+        .expect(b"-ERR wrong number of arguments for 'zcard' command\r\n");
+}

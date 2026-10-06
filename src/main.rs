@@ -424,6 +424,23 @@ fn cmd_zrange(args: &[Frame], store: &mut Store) -> Frame {
     )
 }
 
+/// Spec: ZCARD key → number of members (:N), :0 for a missing set. It's LLEN for sorted sets
+fn cmd_zcard(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 2 {
+        return Frame::Err("ERR wrong number of arguments for 'zcard' command".into());
+    }
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'zcard' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Int(0);
+    };
+    let Value::ZSet(tree) = &entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    Frame::Int(tree.len() as i64)
+}
+
 fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
     if len == 0 {
@@ -507,6 +524,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZADD" => Some(cmd_zadd),
         b"ZRANK" => Some(cmd_zrank),
         b"ZRANGE" => Some(cmd_zrange),
+        b"ZCARD" => Some(cmd_zcard),
         _ => None,
     }
 }
