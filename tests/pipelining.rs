@@ -1756,3 +1756,59 @@ fn zrange_negative_indexes() {
         .cmd(&[b"ZRANGE", b"z", b"0", b"-3"])
         .expect(b"*3\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n");
 }
+
+/// Seed `racer_scores` with the spec's 5 members (rank order:
+/// Ford, Sam-Bodden, Ben, Royce, Prickett).
+fn zadd_racer_scores(c: &mut Client) {
+    c.cmd(&[b"ZADD", b"racer_scores", b"8.5", b"Sam-Bodden"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"racer_scores", b"10.2", b"Royce"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"racer_scores", b"6.1", b"Ford"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"racer_scores", b"14.9", b"Prickett"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"racer_scores", b"10.2", b"Ben"])
+        .expect(b":1\r\n");
+}
+
+/// The spec's `-2 -1` example: the last two members.
+#[test]
+fn zrange_negative_last_two() {
+    let mut t = TestCtx::new();
+    zadd_racer_scores(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"racer_scores", b"-2", b"-1"])
+        .expect(b"*2\r\n$5\r\nRoyce\r\n$8\r\nPrickett\r\n");
+}
+
+/// An out-of-range negative start is treated as 0 (start of the set).
+#[test]
+fn zrange_negative_start_out_of_range_clamps_to_zero() {
+    let mut t = TestCtx::new();
+    zadd_racer_scores(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"racer_scores", b"-6", b"2"])
+        .expect(b"*3\r\n$4\r\nFord\r\n$10\r\nSam-Bodden\r\n$3\r\nBen\r\n");
+}
+
+/// A positive start with a negative stop.
+#[test]
+fn zrange_mixed_positive_negative() {
+    let mut t = TestCtx::new();
+    // rank order: foo(20), caz(25), paz(25), bar(30.1), baz(40.2)
+    t.client
+        .cmd(&[b"ZADD", b"zset_key", b"20.0", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"30.1", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"40.2", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"25.0", b"paz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"zset_key", b"25.0", b"caz"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZRANGE", b"zset_key", b"2", b"-1"])
+        .expect(b"*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
+}
