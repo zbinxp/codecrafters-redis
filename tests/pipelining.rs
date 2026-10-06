@@ -1878,3 +1878,80 @@ fn zcard_with_extra_args_returns_error() {
         .cmd(&[b"ZCARD", b"z", b"extra"])
         .expect(b"-ERR wrong number of arguments for 'zcard' command\r\n");
 }
+
+#[test]
+fn zscore_returns_score() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"30.1", b"m2"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZSCORE", b"z", b"m2"])
+        .expect(b"$4\r\n30.1\r\n");
+}
+
+/// ZSCORE reflects an updated score.
+#[test]
+fn zscore_reflects_score_update() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"30.1", b"m"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZADD", b"z", b"100.99", b"m"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"ZSCORE", b"z", b"m"]).expect(b"$6\r\n100.99\r\n");
+}
+
+/// An integer-valued score is rendered without a trailing `.0`.
+#[test]
+fn zscore_integer_score_has_no_decimal() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZADD", b"z", b"20.0", b"m"]).expect(b":1\r\n");
+    t.client.cmd(&[b"ZSCORE", b"z", b"m"]).expect(b"$2\r\n20\r\n");
+}
+
+/// A member that is not in the set returns null.
+#[test]
+fn zscore_missing_member_returns_null() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZADD", b"z", b"1.0", b"m"]).expect(b":1\r\n");
+    t.client.cmd(&[b"ZSCORE", b"z", b"nope"]).expect(b"$-1\r\n");
+}
+
+/// A missing key returns null.
+#[test]
+fn zscore_missing_key_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZSCORE", b"missing", b"m"])
+        .expect(b"$-1\r\n");
+}
+
+/// ZSCORE against a string key is WRONGTYPE.
+#[test]
+fn zscore_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"ZSCORE", b"s", b"m"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so ZSCORE returns null.
+#[test]
+fn zscore_expired_key_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"ZSCORE", b"k", b"m"]).expect(b"$-1\r\n");
+}
+
+/// ZSCORE takes exactly key + member.
+#[test]
+fn zscore_wrong_arity_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZSCORE", b"z"])
+        .expect(b"-ERR wrong number of arguments for 'zscore' command\r\n");
+}
