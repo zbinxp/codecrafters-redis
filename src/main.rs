@@ -463,6 +463,25 @@ fn cmd_zscore(args: &[Frame], store: &mut Store) -> Frame {
     }
 }
 
+/// Spec: ZREM key member removes member and returns 1 if it existed, 0 otherwise (including a
+/// missing key) 
+fn cmd_zrem(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 3{
+        return Frame::Err("ERR wrong number of arguments for 'zrem' command".into());
+    }
+    let (Some(key), Some(member)) = (bulk(args.get(1)), bulk(args.get(2))) else {
+        return Frame::Err("ERR wrong number of arguments for 'zrem' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Int(0);
+    };
+    let Value::ZSet(tree) = &mut entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    let existed = tree.extract_if(.., |(_,m)| m== member).next().is_some();
+    Frame::Int(existed as i64)
+}
+
 fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
     if len == 0 {
@@ -548,6 +567,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZRANGE" => Some(cmd_zrange),
         b"ZCARD" => Some(cmd_zcard),
         b"ZSCORE" => Some(cmd_zscore),
+        b"ZREM" => Some(cmd_zrem),
         _ => None,
     }
 }

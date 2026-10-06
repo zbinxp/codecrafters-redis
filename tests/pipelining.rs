@@ -1955,3 +1955,79 @@ fn zscore_wrong_arity_returns_error() {
         .cmd(&[b"ZSCORE", b"z"])
         .expect(b"-ERR wrong number of arguments for 'zscore' command\r\n");
 }
+
+#[test]
+fn zrem_returns_one_and_remove_element(){
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"80.5", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"50.3", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"80.5", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZREM", b"z", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZRANGE", b"z", b"0", b"-1"])
+        .expect(b"*2\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+}
+
+/// Removing a member that isn't there returns 0.
+#[test]
+fn zrem_missing_member_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZADD", b"z", b"1.0", b"m"]).expect(b":1\r\n");
+    t.client.cmd(&[b"ZREM", b"z", b"nope"]).expect(b":0\r\n");
+}
+
+/// Removing from a missing key returns 0.
+#[test]
+fn zrem_missing_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZREM", b"missing", b"m"]).expect(b":0\r\n");
+}
+
+/// ZREM against a string key is WRONGTYPE.
+#[test]
+fn zrem_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"ZREM", b"s", b"m"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so ZREM returns 0.
+#[test]
+fn zrem_expired_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"ZREM", b"k", b"m"]).expect(b":0\r\n");
+}
+
+/// Removing every member leaves the set empty.
+#[test]
+fn zrem_all_members_leaves_empty_set() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"1.0", b"a"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"2.0", b"b"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZREM", b"z", b"a"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZREM", b"z", b"b"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZCARD", b"z"])
+        .expect(b":0\r\n");
+}
+
+/// ZREM takes exactly key + member.
+#[test]
+fn zrem_wrong_arity_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZREM", b"z"])
+        .expect(b"-ERR wrong number of arguments for 'zrem' command\r\n");
+}
