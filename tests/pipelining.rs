@@ -2031,3 +2031,51 @@ fn zrem_wrong_arity_returns_error() {
         .cmd(&[b"ZREM", b"z"])
         .expect(b"-ERR wrong number of arguments for 'zrem' command\r\n");
 }
+
+#[test]
+fn type_of_set_returns_string() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"TYPE", b"k"])
+        .expect(b"+string\r\n");
+}
+
+#[test]
+fn type_of_list_returns_list() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"l", b"a"]).expect(b":1\r\n");
+    t.client.cmd(&[b"TYPE", b"l"]).expect(b"+list\r\n");
+}
+
+#[test]
+fn type_of_zset_returns_zset() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZADD", b"z", b"1.0", b"m"]).expect(b":1\r\n");
+    t.client.cmd(&[b"TYPE", b"z"]).expect(b"+zset\r\n");
+}
+
+#[test]
+fn type_missing_key_returns_none() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"TYPE", b"missing"]).expect(b"+none\r\n");
+}
+
+#[test]
+fn type_expired_key_returns_none() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"TYPE", b"k"]).expect(b"+none\r\n");
+}
+
+#[test]
+fn type_wrong_arity_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"TYPE"])
+        .expect(b"-ERR wrong number of arguments for 'type' command\r\n");
+}

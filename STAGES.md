@@ -3,6 +3,13 @@
 > Reconstructed in **platform order** (7 core stages, then extensions in order).
 > Order verified against `codecrafters task -stage +N` (boundaries: cc3, fn4, ic1, jn4).
 > Source: codecrafters-io/build-your-own-redis course-definition. Generated: 2026-09-27.
+>
+> **Progress: 34 done.** core #1–7, Lists #8–18, `cc3` #19.
+> Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** (before
+> the backfill below) and are already done.
+> **Backfilling now:** Streams #20–31 → Transactions #32–42 → Optimistic Locking
+> #43–50 → Replication #51–68 → RDB #69–74 → AOF #75–84.
+> **NEXT: `cf6` — Create a stream (#20).**
 
 | # | Stage | Slug | Group | Status |
 |---|-------|------|-------|--------|
@@ -13,19 +20,19 @@
 | 5 | Implement the ECHO command | `qq0` | core | done |
 | 6 | Implement the SET & GET commands | `la7` | core | done |
 | 7 | Expiry | `yz1` | core | done |
-| 8 | Create a list | `mh6` | Lists | **NEXT** |
-| 9 | Append an element | `tn7` | Lists |  |
-| 10 | Append multiple elements | `lx4` | Lists |  |
-| 11 | List elements (positive indexes) | `sf6` | Lists |  |
-| 12 | List elements (negative indexes) | `ri1` | Lists |  |
-| 13 | Prepend elements | `gu5` | Lists |  |
-| 14 | Query list length | `fv6` | Lists |  |
-| 15 | Remove an element | `ef1` | Lists |  |
-| 16 | Remove multiple elements | `jp1` | Lists |  |
-| 17 | Blocking retrieval | `ec3` | Lists |  |
-| 18 | Blocking retrieval with timeout | `xj7` | Lists |  |
-| 19 | The TYPE command | `cc3` | Streams |  |
-| 20 | Create a stream | `cf6` | Streams |  |
+| 8 | Create a list | `mh6` | Lists | done |
+| 9 | Append an element | `tn7` | Lists | done |
+| 10 | Append multiple elements | `lx4` | Lists | done |
+| 11 | List elements (positive indexes) | `sf6` | Lists | done |
+| 12 | List elements (negative indexes) | `ri1` | Lists | done |
+| 13 | Prepend elements | `gu5` | Lists | done |
+| 14 | Query list length | `fv6` | Lists | done |
+| 15 | Remove an element | `ef1` | Lists | done |
+| 16 | Remove multiple elements | `jp1` | Lists | done |
+| 17 | Blocking retrieval | `ec3` | Lists | done |
+| 18 | Blocking retrieval with timeout | `xj7` | Lists | done |
+| 19 | The TYPE command | `cc3` | Streams | done |
+| 20 | Create a stream | `cf6` | Streams | **NEXT** |
 | 21 | Validating entry IDs | `hq8` | Streams |  |
 | 22 | Partially auto-generated IDs | `yh3` | Streams |  |
 | 23 | Fully auto-generated IDs | `xu6` | Streams |  |
@@ -90,21 +97,21 @@
 | 82 | Filter write commands | `ep6` | AOF Persistence |  |
 | 83 | Replay a single command | `xz2` | AOF Persistence |  |
 | 84 | Replay multiple commands | `kn2` | AOF Persistence |  |
-| 85 | Subscribe to a channel | `mx3` | Pub/Sub |  |
-| 86 | Subscribe to multiple channels | `zc8` | Pub/Sub |  |
-| 87 | Enter subscribed mode | `aw8` | Pub/Sub |  |
-| 88 | PING in subscribed mode | `lf1` | Pub/Sub |  |
-| 89 | Publish a message | `hf2` | Pub/Sub |  |
-| 90 | Deliver messages | `dn4` | Pub/Sub |  |
-| 91 | Unsubscribe | `ze9` | Pub/Sub |  |
-| 92 | Create a sorted set | `ct1` | Sorted Sets |  |
-| 93 | Add members | `hf1` | Sorted Sets |  |
-| 94 | Retrieve member rank | `lg6` | Sorted Sets |  |
-| 95 | List sorted set members | `ic1` | Sorted Sets |  |
-| 96 | ZRANGE with negative indexes | `bj4` | Sorted Sets |  |
-| 97 | Count sorted set members | `kn4` | Sorted Sets |  |
-| 98 | Retrieve member score | `gd7` | Sorted Sets |  |
-| 99 | Remove a member | `sq7` | Sorted Sets |  |
+| 85 | Subscribe to a channel | `mx3` | Pub/Sub | done |
+| 86 | Subscribe to multiple channels | `zc8` | Pub/Sub | done |
+| 87 | Enter subscribed mode | `aw8` | Pub/Sub | done |
+| 88 | PING in subscribed mode | `lf1` | Pub/Sub | done |
+| 89 | Publish a message | `hf2` | Pub/Sub | done |
+| 90 | Deliver messages | `dn4` | Pub/Sub | done |
+| 91 | Unsubscribe | `ze9` | Pub/Sub | done |
+| 92 | Create a sorted set | `ct1` | Sorted Sets | done |
+| 93 | Add members | `hf1` | Sorted Sets | done |
+| 94 | Retrieve member rank | `lg6` | Sorted Sets | done |
+| 95 | List sorted set members | `ic1` | Sorted Sets | done |
+| 96 | ZRANGE with negative indexes | `bj4` | Sorted Sets | done |
+| 97 | Count sorted set members | `kn4` | Sorted Sets | done |
+| 98 | Retrieve member score | `gd7` | Sorted Sets | done |
+| 99 | Remove a member | `sq7` | Sorted Sets | done |
 | 100 | Create a bitmap | `bq9` | Bitmaps |  |
 | 101 | Retrieve a bit | `qj1` | Bitmaps |  |
 | 102 | Read a string as bits | `yj2` | Bitmaps |  |

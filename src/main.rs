@@ -482,6 +482,24 @@ fn cmd_zrem(args: &[Frame], store: &mut Store) -> Frame {
     Frame::Int(existed as i64)
 }
 
+fn cmd_type(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 2 {
+        return Frame::Err("ERR wrong number of arguments for 'type' command".into());
+    }
+    let Some(key) = bulk(args.get(1)) else {
+        return Frame::Err("ERR wrong number of arguments for 'type' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::simple("none");
+    };
+    let type_str = match &entry.value {
+        Value::String(_) => "string",
+        Value::List(_) => "list",
+        Value::ZSet(_) => "zset",
+    };
+    Frame::simple(type_str)
+}
+
 fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
     if len == 0 {
@@ -568,7 +586,8 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZCARD" => Some(cmd_zcard),
         b"ZSCORE" => Some(cmd_zscore),
         b"ZREM" => Some(cmd_zrem),
-        _ => None,
+        b"TYPE" => Some(cmd_type),
+         _ => None,
     }
 }
 
