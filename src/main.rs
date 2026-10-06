@@ -247,19 +247,9 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
 
-    let len = list.len() as i64;
-    if len == 0 {
+    let Some((start, stop)) = resolve_range(list.len(), start, stop) else {
         return Frame::Array(Vec::new());
-    }
-    let mut start = start;
-    let mut stop = stop;
-    if start < 0 { start += len;}
-    if stop < 0 { stop += len;}
-    if start < 0 { start = 0;}
-    if start >= len || start > stop {
-        return Frame::Array(Vec::new());
-    }
-    let stop = min(stop, len - 1);
+    };
     let bulk_str_list: Vec<Frame> = list.range(start as usize..=stop as usize)
         .map(|val| Frame::BulkString(val.to_vec()))
         .collect();
@@ -404,6 +394,52 @@ fn cmd_zrank(args:&[Frame], store: &mut Store) -> Frame {
     }
 }
 
+///  Spec: ZRANGE key start stop → members by rank, stop inclusive.
+fn cmd_zrange(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 4 {
+        return Frame::Err("ERR wrong number of arguments for 'zrange' command".into());
+    }
+    let (Some(key), Some(start_raw), Some(stop_raw)) = 
+        (bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3))) else {
+        return Frame::Err("ERR wrong number of arguments for 'zrange' command".into());
+    };
+    let (Some(start), Some(stop)) = (parse_index(start_raw), parse_index(stop_raw)) else {
+        return Frame::Err(ERR_NOT_VALID_INDEX.into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Array(Vec::new());
+    };
+    let Value::ZSet(tree) = &entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    let Some((start, stop)) = resolve_range(tree.len(), start, stop) else {
+        return Frame::Array(Vec::new());
+    };
+    Frame::Array(
+        tree.iter()
+        .skip(start)
+        .take(stop-start+1)
+        .map(|(_,m)| Frame::bulk(m))
+        .collect()
+    )
+}
+
+fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
+    let len = len as i64;
+    if len == 0 {
+        return None;
+    }
+    let (mut start, mut stop) = (start, stop);
+    if start < 0 { start += len; }
+    if stop < 0 { stop += len; }
+    if start < 0 { start = 0; }
+    if start >= len || start > stop {
+        return None;
+    }
+    let stop = min(stop, len-1);
+    Some((start as usize, stop as usize))
+}
+
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
 /// xj7: Spec: BLPOP key <timeout> where the timeout can be fractional seconds
 async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
@@ -470,6 +506,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"PUBLISH" => Some(cmd_publish),
         b"ZADD" => Some(cmd_zadd),
         b"ZRANK" => Some(cmd_zrank),
+        b"ZRANGE" => Some(cmd_zrange),
         _ => None,
     }
 }

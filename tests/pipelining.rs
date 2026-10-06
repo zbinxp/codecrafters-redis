@@ -1652,3 +1652,107 @@ fn zrank_expired_key_returns_null() {
     sleep(Duration::from_millis(200));
     t.client.cmd(&[b"ZRANK", b"k", b"m"]).expect(b"$-1\r\n");
 }
+
+#[test]
+fn zrange_returns_array() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"100.0", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"100.0", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"20.0", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"30.1", b"caz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"40.2", b"paz"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"ZRANGE", b"z", b"0", b"2"]).expect(b"*3\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n");
+    t.client.cmd(&[b"ZRANGE", b"z", b"2", b"4"]).expect(b"*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+}
+
+/// Seed key `z` with the 5-member set from the spec (rank order:
+/// baz, caz, paz, bar, foo).
+fn zadd_spec_set(c: &mut Client) {
+    c.cmd(&[b"ZADD", b"z", b"100.0", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"100.0", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"20.0", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"30.1", b"caz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"40.2", b"paz"])
+        .expect(b":1\r\n");
+}
+
+/// `stop` beyond the end clamps to the last member.
+#[test]
+fn zrange_stop_beyond_length_clamps() {
+    let mut t = TestCtx::new();
+    zadd_spec_set(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"z", b"0", b"99"])
+        .expect(b"*5\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+}
+
+/// `start >= len` returns an empty array.
+#[test]
+fn zrange_start_beyond_length_returns_empty() {
+    let mut t = TestCtx::new();
+    zadd_spec_set(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"z", b"5", b"10"])
+        .expect(b"*0\r\n");
+}
+
+/// `start > stop` returns an empty array.
+#[test]
+fn zrange_start_greater_than_stop_returns_empty() {
+    let mut t = TestCtx::new();
+    zadd_spec_set(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"z", b"2", b"1"])
+        .expect(b"*0\r\n");
+}
+
+/// A missing key returns an empty array.
+#[test]
+fn zrange_missing_key_returns_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZRANGE", b"missing", b"0", b"1"])
+        .expect(b"*0\r\n");
+}
+
+/// ZRANGE against a string key is WRONGTYPE.
+#[test]
+fn zrange_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"ZRANGE", b"s", b"0", b"1"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so ZRANGE returns an empty array.
+#[test]
+fn zrange_expired_key_returns_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"ZRANGE", b"k", b"0", b"1"]).expect(b"*0\r\n");
+}
+
+/// Negative indexes work through the shared normalization (bj4).
+#[test]
+fn zrange_negative_indexes() {
+    let mut t = TestCtx::new();
+    zadd_spec_set(&mut t.client);
+    t.client
+        .cmd(&[b"ZRANGE", b"z", b"-2", b"-1"])
+        .expect(b"*2\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+    t.client
+        .cmd(&[b"ZRANGE", b"z", b"0", b"-3"])
+        .expect(b"*3\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n");
+}
