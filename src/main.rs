@@ -377,7 +377,31 @@ fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
     // check existance
     let existed = tree.extract_if(.., |(_,m)| m==member).next().is_some();
     tree.insert((Score(val), member.to_vec()));
+    // todo: use a HM to store (member, score)
     Frame::Int(!existed as i64)
+}
+
+///  Spec: ZRANK key member → the 0-based rank of member when the set is ordered by ascending
+/// score, ties broken lexicographically by member. Missing member or key → null bulk string
+/// $-1\r\n.
+fn cmd_zrank(args:&[Frame], store: &mut Store) -> Frame {
+    if args.len() != 3{
+        return Frame::Err("ERR wrong number of arguments for 'zrank' command".into());
+    }
+    let (Some(key), Some(member)) = (bulk(args.get(1)), bulk(args.get(2))) else {
+        return Frame::Err("ERR wrong number of arguments for 'zrank' command".into());
+    };
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Null;
+    };
+    let Value::ZSet(tree) = &entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    
+    match tree.iter().position(|(_,m)| m == member) {
+        Some(rank) => Frame::Int(rank as i64),
+        None => Frame::Null,
+    }
 }
 
 /// BLPOP key timeout → on success, a 2-element array [key, element]:
@@ -445,6 +469,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"LPOP" => Some(cmd_lpop),
         b"PUBLISH" => Some(cmd_publish),
         b"ZADD" => Some(cmd_zadd),
+        b"ZRANK" => Some(cmd_zrank),
         _ => None,
     }
 }

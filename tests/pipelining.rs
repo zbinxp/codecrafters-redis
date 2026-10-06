@@ -1573,3 +1573,82 @@ fn zadd_update_score_returns_zero() {
         .cmd(&[b"ZADD", b"z", b"8.0", b"m"])
         .expect(b":0\r\n");
 }
+
+#[test]
+fn zrank_return_lexicographically() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"100.0", b"foo"]).expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"100.0", b"bar"]).expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"20.0", b"baz"]).expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"30.1", b"caz"]).expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"40.2", b"paz"]).expect(b":1\r\n")
+        ;
+    // baz, caz, paz, bar, foo
+    t.client
+        .cmd(&[b"ZRANK", b"z", b"baz"])
+        .expect(b":0\r\n");
+
+    t.client
+        .cmd(&[b"ZRANK", b"z", b"paz"])
+        .expect(b":2\r\n");
+
+    t.client
+        .cmd(&[b"ZRANK", b"z", b"foo"])
+        .expect(b":4\r\n");
+}
+
+/// The remaining ranks in the ordering (caz=1, bar=3).
+#[test]
+fn zrank_returns_middle_ranks() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"z", b"100.0", b"foo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"100.0", b"bar"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"20.0", b"baz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"30.1", b"caz"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZADD", b"z", b"40.2", b"paz"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"ZRANK", b"z", b"caz"]).expect(b":1\r\n");
+    t.client.cmd(&[b"ZRANK", b"z", b"bar"]).expect(b":3\r\n");
+}
+
+/// A member that is not in the set returns null.
+#[test]
+fn zrank_missing_member_returns_null() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"ZADD", b"z", b"1.0", b"m"]).expect(b":1\r\n");
+    t.client.cmd(&[b"ZRANK", b"z", b"nope"]).expect(b"$-1\r\n");
+}
+
+/// A missing key returns null.
+#[test]
+fn zrank_missing_key_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZRANK", b"missing", b"m"])
+        .expect(b"$-1\r\n");
+}
+
+/// ZRANK against a string key is WRONGTYPE.
+#[test]
+fn zrank_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"v"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"ZRANK", b"s", b"m"]).expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so ZRANK returns null.
+#[test]
+fn zrank_expired_key_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"ZRANK", b"k", b"m"]).expect(b"$-1\r\n");
+}
