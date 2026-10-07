@@ -1,5 +1,5 @@
 use std::{
-    cmp::{Ordering, min}, collections::{BTreeSet, HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
+    cmp::{Ordering, min}, collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
 };
 
 use bytes::BytesMut;
@@ -17,6 +17,13 @@ const ERR_VALUE_OUT_OF_RANGE: &str = "ERR value is out of range, must be positiv
 
  // one global counter
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+/// A command handler receives the full argument list (index 0 is the command
+/// name) and produces a reply.
+type Handler = fn(&[Frame], &mut Store) -> Frame;
+type Store = Db;
+type Outbox = mpsc::UnboundedSender<Frame>;
+type ZEntry = (Score, Vec<u8>);
 
 /// the value type in our Store
 struct Entry {
@@ -36,7 +43,8 @@ impl Entry {
 enum Value {
     String(Vec<u8>),
     List(VecDeque<Vec<u8>>),
-    ZSet(BTreeSet<ZEntry>)
+    ZSet(BTreeSet<ZEntry>),
+    Stream(BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>),
 }
 
 struct Db {
@@ -75,12 +83,20 @@ impl PartialOrd for Score {
     }
 }
 
-/// A command handler receives the full argument list (index 0 is the command
-/// name) and produces a reply.
-type Handler = fn(&[Frame], &mut Store) -> Frame;
-type Store = Db;
-type Outbox = mpsc::UnboundedSender<Frame>;
-type ZEntry = (Score, Vec<u8>);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct StreamId(u64, u64);
+
+impl StreamId {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let s = str::from_utf8(bytes).ok()?;
+        let (ms, seq) = s.split_once('-')?;
+        Some(StreamId(ms.parse().ok()?, seq.parse().ok()?))
+    }
+
+    fn render(&self) -> String {
+        format!("{}-{}", self.0, self.1)
+    }
+}
 
 fn cmd_ping(_args: &[Frame], _store: &mut Store) -> Frame {
     Frame::simple("PONG")
@@ -496,8 +512,38 @@ fn cmd_type(args: &[Frame], store: &mut Store) -> Frame {
         Value::String(_) => "string",
         Value::List(_) => "list",
         Value::ZSet(_) => "zset",
+        Value::Stream(_) => "stream",
     };
     Frame::simple(type_str)
+}
+
+/// Spec: XADD key <id> field value [field value …] creates the stream if absent, appends an
+/// entry, and returns the entry ID as a bulk string.
+fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() < 5 || (args.len() - 3) % 2 != 0 {
+        return Frame::Err("ERR wrong number of arguments for 'xadd' command".into());
+    }
+    let (Some(key), Some(id_raw)) = (bulk(args.get(1)), bulk(args.get(2))) else {
+        return Frame::Err("ERR wrong number of arguments for 'xadd' command".into());
+    };
+    let Some(id) = StreamId::parse(id_raw) else {
+        return Frame::Err("ERR Invalid stream ID specified as stream command argument".into());
+    };
+    let mut fields = Vec::new();
+    for pair in args[3..].chunks(2) {
+        let (Some(f), Some(v)) = (bulk(Some(&pair[0])), bulk(Some(&pair[1]))) else {
+            return Frame::Err("ERR wrong number of arguments for 'xadd' command".into());
+        };
+        fields.push((f.to_vec(), v.to_vec()));
+    }
+    live_entry(store, key);
+    let entry = store.data.entry(key.to_vec())
+        .or_insert_with(|| Entry::new(Value::Stream(BTreeMap::new())));
+    let Value::Stream(stream) = &mut entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into());
+    };
+    stream.insert(id, fields);
+    Frame::bulk(id.render())
 }
 
 fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
@@ -587,6 +633,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZSCORE" => Some(cmd_zscore),
         b"ZREM" => Some(cmd_zrem),
         b"TYPE" => Some(cmd_type),
+        b"XADD" => Some(cmd_xadd),
          _ => None,
     }
 }

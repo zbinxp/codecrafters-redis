@@ -2079,3 +2079,75 @@ fn type_wrong_arity_returns_error() {
         .cmd(&[b"TYPE"])
         .expect(b"-ERR wrong number of arguments for 'type' command\r\n");
 }
+
+#[test]
+fn xadd_key_id_field_value_returns_stream_id() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"foo", b"bar"])
+        .expect(b"$3\r\n0-1\r\n")
+        .cmd(&[b"TYPE", b"s"])
+        .expect(b"+stream\r\n");
+}
+
+/// A second XADD appends and returns its own ID.
+#[test]
+fn xadd_appends_second_entry() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"a", b"1"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-2", b"b", b"2"])
+        .expect(b"$3\r\n0-2\r\n");
+}
+
+/// An entry can carry several field/value pairs.
+#[test]
+fn xadd_multi_field_entry() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f1", b"v1", b"f2", b"v2"])
+        .expect(b"$3\r\n0-1\r\n");
+}
+
+/// A malformed ID is rejected.
+#[test]
+fn xadd_invalid_id_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"notanid", b"f", b"v"])
+        .expect(b"-ERR Invalid stream ID specified as stream command argument\r\n");
+}
+
+/// Field/value pairs must come in twos.
+#[test]
+fn xadd_odd_pairs_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f"])
+        .expect(b"-ERR wrong number of arguments for 'xadd' command\r\n");
+}
+
+/// XADD against a string key is WRONGTYPE.
+#[test]
+fn xadd_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"XADD", b"k", b"0-1", b"f", b"v"])
+        .expect(WRONGTYPE);
+}
+
+/// An expired key is treated as absent, so XADD creates a fresh stream.
+#[test]
+fn xadd_on_expired_key_creates_stream() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client
+        .cmd(&[b"XADD", b"k", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+}
