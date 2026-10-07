@@ -1,10 +1,21 @@
 use std::{
-    cmp::{Ordering, min}, collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque}, io, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
+    cmp::{Ordering, min},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    io,
+    sync::{Arc, Mutex, atomic::AtomicU64},
+    time::{Duration, Instant},
+    vec,
 };
 
 use bytes::BytesMut;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf}, net::TcpListener, sync::{mpsc::{self, UnboundedSender}, oneshot}, time::sleep
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf},
+    net::TcpListener,
+    sync::{
+        mpsc::{self, UnboundedSender},
+        oneshot,
+    },
+    time::sleep,
 };
 
 mod resp;
@@ -15,7 +26,7 @@ const WRONGTYPE_KEY_WRONG: &str =
 const ERR_NOT_VALID_INDEX: &str = "ERR value is not an integer or out of range";
 const ERR_VALUE_OUT_OF_RANGE: &str = "ERR value is out of range, must be positive";
 
- // one global counter
+// one global counter
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// A command handler receives the full argument list (index 0 is the command
@@ -50,7 +61,7 @@ enum Value {
 struct Db {
     data: HashMap<Vec<u8>, Entry>,
     waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
-    channel_subscribers: HashMap<Vec<u8>, HashMap<u64,Outbox>>,
+    channel_subscribers: HashMap<Vec<u8>, HashMap<u64, Outbox>>,
 }
 
 impl Db {
@@ -58,7 +69,7 @@ impl Db {
         Self {
             data: HashMap::new(),
             waiters: HashMap::new(),
-            channel_subscribers: HashMap::new()
+            channel_subscribers: HashMap::new(),
         }
     }
 }
@@ -195,15 +206,21 @@ fn cmd_lpush(args: &[Frame], store: &mut Store) -> Frame {
     push_impl(args, store, "lpush", VecDeque::push_front)
 }
 
-fn push_impl(args: &[Frame], store: &mut Store, fn_name:&str, push:fn(&mut VecDeque<Vec<u8>>,Vec<u8>)) -> Frame {
+fn push_impl(
+    args: &[Frame],
+    store: &mut Store,
+    fn_name: &str,
+    push: fn(&mut VecDeque<Vec<u8>>, Vec<u8>),
+) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
-        return Frame::Err(format!("ERR wrong number of arguments for '{}'",fn_name));
+        return Frame::Err(format!("ERR wrong number of arguments for '{}'", fn_name));
     };
     if args.len() < 3 {
-        return Frame::Err(format!("ERR wrong number of arguments for '{}'",fn_name));
+        return Frame::Err(format!("ERR wrong number of arguments for '{}'", fn_name));
     }
 
-    let entry = store.data
+    let entry = store
+        .data
         .entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::List(VecDeque::new())));
 
@@ -219,7 +236,7 @@ fn push_impl(args: &[Frame], store: &mut Store, fn_name:&str, push:fn(&mut VecDe
         let Some(val) = bulk(Some(elem)) else {
             return Frame::Err("ERR wrong format of arguments for 'rpush'".into());
         };
-        push(list,val.to_vec());
+        push(list, val.to_vec());
 
         // still hold the lock, notify the waiters
         if let Some(q) = store.waiters.get_mut(key) {
@@ -266,7 +283,8 @@ fn cmd_lrange(args: &[Frame], store: &mut Store) -> Frame {
     let Some((start, stop)) = resolve_range(list.len(), start, stop) else {
         return Frame::Array(Vec::new());
     };
-    let bulk_str_list: Vec<Frame> = list.range(start as usize..=stop as usize)
+    let bulk_str_list: Vec<Frame> = list
+        .range(start as usize..=stop as usize)
         .map(|val| Frame::BulkString(val.to_vec()))
         .collect();
     Frame::Array(bulk_str_list)
@@ -286,13 +304,13 @@ fn cmd_llen(args: &[Frame], store: &mut Store) -> Frame {
 
     match &entry.value {
         Value::List(list) => Frame::Int(list.len() as i64),
-        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
     }
 }
 
-/// Spec: LPOP key removes and returns the first element as a bulk string. 
+/// Spec: LPOP key removes and returns the first element as a bulk string.
 /// Missing/empty list → $-1\r\n.
-/// Spec: LPOP key 2 removes and returns the first N elements as a RESP array. 
+/// Spec: LPOP key 2 removes and returns the first N elements as a RESP array.
 /// If N > length, remove all and return them.
 fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
     if args.len() < 2 || args.len() > 3 {
@@ -302,7 +320,7 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
         return Frame::Err("ERR wrong number of arguments for 'lpop' command".into());
     };
-    
+
     let count = match bulk(args.get(2)) {
         Some(val) => match parse_index(val) {
             Some(index) => {
@@ -310,31 +328,31 @@ fn cmd_lpop(args: &[Frame], store: &mut Store) -> Frame {
                     return Frame::Err(ERR_VALUE_OUT_OF_RANGE.into());
                 }
                 Some(index)
-            },
-            None => return Frame::Err(ERR_NOT_VALID_INDEX.into())
+            }
+            None => return Frame::Err(ERR_NOT_VALID_INDEX.into()),
         },
-        None => None
+        None => None,
     };
     let Some(entry) = live_entry(store, key) else {
-        return count.map_or(Frame::Null, |_|Frame::NullArray);
+        return count.map_or(Frame::Null, |_| Frame::NullArray);
     };
 
     match &mut entry.value {
-        Value::List(list) => {
-            match count {
-                None => match list.pop_front() {
-                    Some(v) => Frame::bulk(v),
-                    None => Frame::Null,
-                },
-                Some(n) => {
-                    let n = n.min(list.len() as i64);
-                    let removed: Vec<Frame> = (0..n).filter_map(|_|list.pop_front())
-                        .map(Frame::bulk).collect();
-                    Frame::Array(removed)
-                }
-            }          
+        Value::List(list) => match count {
+            None => match list.pop_front() {
+                Some(v) => Frame::bulk(v),
+                None => Frame::Null,
+            },
+            Some(n) => {
+                let n = n.min(list.len() as i64);
+                let removed: Vec<Frame> = (0..n)
+                    .filter_map(|_| list.pop_front())
+                    .map(Frame::bulk)
+                    .collect();
+                Frame::Array(removed)
+            }
         },
-        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        _ => Frame::Err(WRONGTYPE_KEY_WRONG.into()),
     }
 }
 
@@ -344,10 +362,15 @@ fn cmd_publish(args: &[Frame], store: &mut Store) -> Frame {
     let (Some(channel), Some(_msg)) = (bulk(args.get(1)), bulk(args.get(2))) else {
         return Frame::Err("ERR wrong number of arguments for 'publish' command".into());
     };
-    let n = store.channel_subscribers.get(channel)
+    let n = store
+        .channel_subscribers
+        .get(channel)
         .unwrap_or(&HashMap::new())
-        .iter().filter_map(|(_conn_id, sender)| {
-            sender.send(Frame::array(vec![b"message", channel, _msg])).ok()
+        .iter()
+        .filter_map(|(_conn_id, sender)| {
+            sender
+                .send(Frame::array(vec![b"message", channel, _msg]))
+                .ok()
         })
         .count();
     Frame::Int(n as i64)
@@ -361,9 +384,9 @@ fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err("ERR wrong number of arguments for 'zadd' command".into());
     }
 
-    let (Some(key), Some(score), Some(member)) = (
-        bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3))
-    ) else{
+    let (Some(key), Some(score), Some(member)) =
+        (bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3)))
+    else {
         return Frame::Err("ERR wrong number of arguments for 'zadd' command".into());
     };
     let Some(val) = parse_f64(score) else {
@@ -374,14 +397,16 @@ fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
     }
     live_entry(store, key);
 
-    let entry = store.data.entry(key.to_vec())
+    let entry = store
+        .data
+        .entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::ZSet(BTreeSet::new())));
-    
+
     let Value::ZSet(tree) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
     // check existance
-    let existed = tree.extract_if(.., |(_,m)| m==member).next().is_some();
+    let existed = tree.extract_if(.., |(_, m)| m == member).next().is_some();
     tree.insert((Score(val), member.to_vec()));
     // todo: use a HM to store (member, score)
     Frame::Int(!existed as i64)
@@ -390,8 +415,8 @@ fn cmd_zadd(args: &[Frame], store: &mut Store) -> Frame {
 ///  Spec: ZRANK key member → the 0-based rank of member when the set is ordered by ascending
 /// score, ties broken lexicographically by member. Missing member or key → null bulk string
 /// $-1\r\n.
-fn cmd_zrank(args:&[Frame], store: &mut Store) -> Frame {
-    if args.len() != 3{
+fn cmd_zrank(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 3 {
         return Frame::Err("ERR wrong number of arguments for 'zrank' command".into());
     }
     let (Some(key), Some(member)) = (bulk(args.get(1)), bulk(args.get(2))) else {
@@ -403,8 +428,8 @@ fn cmd_zrank(args:&[Frame], store: &mut Store) -> Frame {
     let Value::ZSet(tree) = &entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
-    
-    match tree.iter().position(|(_,m)| m == member) {
+
+    match tree.iter().position(|(_, m)| m == member) {
         Some(rank) => Frame::Int(rank as i64),
         None => Frame::Null,
     }
@@ -415,8 +440,9 @@ fn cmd_zrange(args: &[Frame], store: &mut Store) -> Frame {
     if args.len() != 4 {
         return Frame::Err("ERR wrong number of arguments for 'zrange' command".into());
     }
-    let (Some(key), Some(start_raw), Some(stop_raw)) = 
-        (bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3))) else {
+    let (Some(key), Some(start_raw), Some(stop_raw)) =
+        (bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3)))
+    else {
         return Frame::Err("ERR wrong number of arguments for 'zrange' command".into());
     };
     let (Some(start), Some(stop)) = (parse_index(start_raw), parse_index(stop_raw)) else {
@@ -433,10 +459,10 @@ fn cmd_zrange(args: &[Frame], store: &mut Store) -> Frame {
     };
     Frame::Array(
         tree.iter()
-        .skip(start)
-        .take(stop-start+1)
-        .map(|(_,m)| Frame::bulk(m))
-        .collect()
+            .skip(start)
+            .take(stop - start + 1)
+            .map(|(_, m)| Frame::bulk(m))
+            .collect(),
     )
 }
 
@@ -460,7 +486,7 @@ fn cmd_zcard(args: &[Frame], store: &mut Store) -> Frame {
 /// Spec: ZSCORE key member → the member's score as a RESP bulk string; missing member or key →
 /// $-1\r\n.
 fn cmd_zscore(args: &[Frame], store: &mut Store) -> Frame {
-    if args.len() != 3{
+    if args.len() != 3 {
         return Frame::Err("ERR wrong number of arguments for 'zscore' command".into());
     }
     let (Some(key), Some(member)) = (bulk(args.get(1)), bulk(args.get(2))) else {
@@ -473,16 +499,16 @@ fn cmd_zscore(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
 
-    match tree.iter().find(|(_,m)| m == member) {
-        Some((score,_)) => Frame::bulk(score.0.to_string()),
+    match tree.iter().find(|(_, m)| m == member) {
+        Some((score, _)) => Frame::bulk(score.0.to_string()),
         None => Frame::Null,
     }
 }
 
 /// Spec: ZREM key member removes member and returns 1 if it existed, 0 otherwise (including a
-/// missing key) 
+/// missing key)
 fn cmd_zrem(args: &[Frame], store: &mut Store) -> Frame {
-    if args.len() != 3{
+    if args.len() != 3 {
         return Frame::Err("ERR wrong number of arguments for 'zrem' command".into());
     }
     let (Some(key), Some(member)) = (bulk(args.get(1)), bulk(args.get(2))) else {
@@ -494,7 +520,7 @@ fn cmd_zrem(args: &[Frame], store: &mut Store) -> Frame {
     let Value::ZSet(tree) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
-    let existed = tree.extract_if(.., |(_,m)| m== member).next().is_some();
+    let existed = tree.extract_if(.., |(_, m)| m == member).next().is_some();
     Frame::Int(existed as i64)
 }
 
@@ -517,20 +543,31 @@ fn cmd_type(args: &[Frame], store: &mut Store) -> Frame {
     Frame::simple(type_str)
 }
 
-enum IdSpec{
+enum IdSpec {
     Explicit(StreamId),
     AutoSeq(u64),
+    FullyAutoSeq,
 }
 
 fn parse_id_spec(bytes: &[u8]) -> Option<IdSpec> {
     let s = str::from_utf8(bytes).ok()?;
+    if s == "*" {
+        return Some(IdSpec::FullyAutoSeq);
+    }
     let (ms, seq) = s.split_once('-')?;
     let ms: u64 = ms.parse().ok()?;
     if seq == "*" {
         Some(IdSpec::AutoSeq(ms))
-    }else{
+    } else {
         Some(IdSpec::Explicit(StreamId(ms, seq.parse().ok()?)))
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Spec: XADD key <id> field value [field value …] creates the stream if absent, appends an
@@ -564,29 +601,47 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
         },
         None => None,
     };
-    
+
     let id = match spec {
         IdSpec::Explicit(id) => id,
         IdSpec::AutoSeq(ms) => {
             let seq = match last {
                 Some(l) if l.0 == ms => l.1 + 1,
-                _ => if ms == 0 { 1 } else { 0 }
+                _ => {
+                    if ms == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
             };
             StreamId(ms, seq)
+        }
+        IdSpec::FullyAutoSeq => {
+            let now = now_ms();
+            match last {
+                Some(l) if now <= l.0 => StreamId(l.0, l.1 + 1),
+                _ => StreamId(now, 0),
+            }
         }
     };
 
     // 0-0 is always invalid
-    if id == StreamId(0,0) {
+    if id == StreamId(0, 0) {
         return Frame::Err("ERR The ID specified in XADD must be greater than 0-0".into());
     }
 
     if let Some(l) = last {
         if id <= l {
-            return Frame::Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
+            return Frame::Err(
+                "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                    .into(),
+            );
         }
     }
-    let entry = store.data.entry(key.to_vec())
+    let entry = store
+        .data
+        .entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::Stream(BTreeMap::new())));
     let Value::Stream(stream) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
@@ -601,13 +656,19 @@ fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
         return None;
     }
     let (mut start, mut stop) = (start, stop);
-    if start < 0 { start += len; }
-    if stop < 0 { stop += len; }
-    if start < 0 { start = 0; }
+    if start < 0 {
+        start += len;
+    }
+    if stop < 0 {
+        stop += len;
+    }
+    if start < 0 {
+        start = 0;
+    }
     if start >= len || start > stop {
         return None;
     }
-    let stop = min(stop, len-1);
+    let stop = min(stop, len - 1);
     Some((start as usize, stop as usize))
 }
 
@@ -615,14 +676,17 @@ fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
 /// xj7: Spec: BLPOP key <timeout> where the timeout can be fractional seconds
 async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
     let Some(key) = bulk(args.get(1)) else {
-        return Frame::Err(format!("ERR wrong number of arguments for '{}' command", "blpop"));
+        return Frame::Err(format!(
+            "ERR wrong number of arguments for '{}' command",
+            "blpop"
+        ));
     };
     let timeout = match bulk(args.get(2)) {
         Some(val) => match parse_f64(val) {
             Some(timeout) => timeout,
             None => return Frame::Err("ERR timeout is not a float or out of range".into()),
         },
-        None => 0.0
+        None => 0.0,
     };
 
     if !timeout.is_finite() || timeout < 0.0 {
@@ -630,18 +694,19 @@ async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
     }
 
     let timeout = Duration::from_secs_f64(timeout);
-    loop { // when notified, we need a loop to check if value is arrived
+    loop {
+        // when notified, we need a loop to check if value is arrived
         let rx = {
-            let mut db = store.lock().unwrap_or_else(|e|e.into_inner());
+            let mut db = store.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = db.data.get_mut(key) {
-                let Value::List(list) = &mut entry.value else{
-                    return Frame::Err(WRONGTYPE_KEY_WRONG.into());     
+                let Value::List(list) = &mut entry.value else {
+                    return Frame::Err(WRONGTYPE_KEY_WRONG.into());
                 };
                 if let Some(v) = list.pop_front() {
-                    return Frame::Array(vec![Frame::bulk(key), Frame::bulk(v)])
+                    return Frame::Array(vec![Frame::bulk(key), Frame::bulk(v)]);
                 }
             }
-            
+
             // if no value got, wait for notify
             let (tx, rx) = oneshot::channel();
             db.waiters.entry(key.to_vec()).or_default().push_back(tx);
@@ -654,15 +719,19 @@ async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Frame {
     }
 }
 
-fn live_entry<'a>(store:&'a mut Store, key:&[u8]) -> Option<&'a mut Entry> {
-    if store.data.get(key).and_then(|e|e.expires_at).is_some_and(|t|t <= Instant::now()) {
+fn live_entry<'a>(store: &'a mut Store, key: &[u8]) -> Option<&'a mut Entry> {
+    if store
+        .data
+        .get(key)
+        .and_then(|e| e.expires_at)
+        .is_some_and(|t| t <= Instant::now())
+    {
         store.data.remove(key);
     }
     store.data.get_mut(key)
 }
 
 /// Map a command name to its handler. Adding a command is a one-line change
-/// here plus a new handler -- `execute` stays untouched (Open/Closed).
 fn lookup(name: &[u8]) -> Option<Handler> {
     match name {
         b"PING" | b"COMMAND" => Some(cmd_ping),
@@ -683,7 +752,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZREM" => Some(cmd_zrem),
         b"TYPE" => Some(cmd_type),
         b"XADD" => Some(cmd_xadd),
-         _ => None,
+        _ => None,
     }
 }
 
@@ -724,7 +793,8 @@ struct StreamHandler<S> {
 }
 
 impl<S> StreamHandler<S>
-where S: AsyncRead + AsyncWrite + Unpin
+where
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     fn new(reader: ReadHalf<S>, store: Arc<Mutex<Store>>, tx: UnboundedSender<Frame>) -> Self {
         StreamHandler {
@@ -734,7 +804,7 @@ where S: AsyncRead + AsyncWrite + Unpin
             store,
             subscriptions: HashSet::new(),
             out_tx: tx,
-            conn_id: NEXT_CONN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            conn_id: NEXT_CONN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -759,12 +829,14 @@ where S: AsyncRead + AsyncWrite + Unpin
     async fn respond(&mut self, val: Frame) -> io::Result<()> {
         let reply = self.generate_reply(&val).await;
         for f in reply {
-            self.out_tx.send(f).map_err(|e|io::Error::other(e.to_string()))?;
+            self.out_tx
+                .send(f)
+                .map_err(|e| io::Error::other(e.to_string()))?;
         }
         Ok(())
     }
 
-    async fn generate_reply(&mut self, f:&Frame) -> Vec<Frame> {
+    async fn generate_reply(&mut self, f: &Frame) -> Vec<Frame> {
         // check if command is blpop
         if let Frame::Array(args) = f {
             if let Some(cmd) = bulk(args.get(0)) {
@@ -773,7 +845,7 @@ where S: AsyncRead + AsyncWrite + Unpin
                     let name = String::from_utf8_lossy(cmd).to_lowercase();
                     return vec![Frame::Err(format!(
                         "ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
-                    ))]
+                    ))];
                 }
 
                 if !self.subscriptions.is_empty() {
@@ -798,14 +870,17 @@ where S: AsyncRead + AsyncWrite + Unpin
         execute(f, &mut store).into_iter().collect()
     }
 
-    fn subscribe(&mut self, args:&[Frame]) -> Vec<Frame> {
+    fn subscribe(&mut self, args: &[Frame]) -> Vec<Frame> {
         let channels = &args[1..];
         if channels.is_empty() {
-            return vec![Frame::Err("ERR wrong number of arguments for 'subscribe' command".into())];
+            return vec![Frame::Err(
+                "ERR wrong number of arguments for 'subscribe' command".into(),
+            )];
         }
         // let mut n = 0;
-        channels.iter()
-            .filter_map(|c|bulk(Some(c)))
+        channels
+            .iter()
+            .filter_map(|c| bulk(Some(c)))
             .map(|ch| {
                 // n += 1;
                 // self.out_tx.send(Frame::Array(vec![Frame::bulk("subscribe"), Frame::bulk(ch), Frame::Int(n)]));
@@ -813,33 +888,37 @@ where S: AsyncRead + AsyncWrite + Unpin
                 // for newly created channel
                 let newly = self.subscriptions.insert(ch.to_vec());
                 if newly {
-                    let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                    let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
                     // register tx to channel_subscribers
-                    store.channel_subscribers.entry(ch.to_vec())
-                        .or_default().insert(self.conn_id, self.out_tx.clone());
+                    store
+                        .channel_subscribers
+                        .entry(ch.to_vec())
+                        .or_default()
+                        .insert(self.conn_id, self.out_tx.clone());
                 }
                 Frame::Array(vec![
                     Frame::bulk("subscribe"),
                     Frame::bulk(ch),
-                    Frame::Int(self.subscriptions.len() as i64)
+                    Frame::Int(self.subscriptions.len() as i64),
                 ])
             })
             .collect()
-        
     }
 
-
-    fn unsubscribe(&mut self, args:&[Frame]) -> Vec<Frame> {
+    fn unsubscribe(&mut self, args: &[Frame]) -> Vec<Frame> {
         let channels = &args[1..];
         if channels.is_empty() {
-            return vec![Frame::Err("ERR wrong number of arguments for 'unsubscribe' command".into())];
+            return vec![Frame::Err(
+                "ERR wrong number of arguments for 'unsubscribe' command".into(),
+            )];
         }
 
-        channels.iter()
+        channels
+            .iter()
             .filter_map(|c| bulk(Some(c)))
             .map(|ch| {
                 if self.subscriptions.remove(ch) {
-                    let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                    let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(subs) = store.channel_subscribers.get_mut(ch) {
                         subs.remove(&self.conn_id);
                         if subs.is_empty() {
@@ -849,9 +928,10 @@ where S: AsyncRead + AsyncWrite + Unpin
                 }
 
                 Frame::Array(vec![
-                    Frame::bulk(b"unsubscribe"), 
-                    Frame::bulk(ch), 
-                    Frame::Int(self.subscriptions.len() as i64)])
+                    Frame::bulk(b"unsubscribe"),
+                    Frame::bulk(ch),
+                    Frame::Int(self.subscriptions.len() as i64),
+                ])
             })
             .collect()
     }
@@ -859,10 +939,15 @@ where S: AsyncRead + AsyncWrite + Unpin
 
 fn allowed_in_subscribe_mode(cmd: &[u8]) -> bool {
     const ALLOWED: &[&[u8]] = &[
-        b"SUBSCRIBE", b"UNSUBSCRIBE", b"PSUBSCRIBE", b"PUNSUBSCRIBE",
-        b"PING", b"QUIT", b"RESET"
+        b"SUBSCRIBE",
+        b"UNSUBSCRIBE",
+        b"PSUBSCRIBE",
+        b"PUNSUBSCRIBE",
+        b"PING",
+        b"QUIT",
+        b"RESET",
     ];
-    ALLOWED.iter().any(|a|cmd.eq_ignore_ascii_case(a))
+    ALLOWED.iter().any(|a| cmd.eq_ignore_ascii_case(a))
 }
 
 #[tokio::main]
@@ -881,10 +966,11 @@ async fn main() {
             while let Some(frame) = out_rx.recv().await {
                 buf.clear();
                 frame.encode(&mut buf);
-                if wr.write_all(&buf).await.is_err() { break; }
+                if wr.write_all(&buf).await.is_err() {
+                    break;
+                }
             }
         });
-
 
         let store_clone = Arc::clone(&store);
         tokio::spawn(async move {

@@ -227,6 +227,14 @@ impl Client {
             Err(e) => panic!("read failed: {e}"),
         }
     }
+
+    fn read_line(&mut self) -> Vec<u8> {
+       self.fill_line(TIMEOUT);
+       let end = self.buf.windows(2).position(|w| w == b"\r\n").expect("no line") + 2;
+       let line = self.buf[..end - 2].to_vec();
+       self.buf.drain(..end);
+       line
+   }
 }
 
 /// Append a RESP bulk string to `out`.
@@ -2294,4 +2302,48 @@ fn xadd_zero_zero_does_not_create_stream() {
         .cmd(&[b"XADD", b"s", b"0-0", b"f", b"v"])
         .expect(b"-ERR The ID specified in XADD must be greater than 0-0\r\n");
     t.client.cmd(&[b"TYPE", b"s"]).expect(b"+none\r\n");
+}
+
+#[test]
+fn xadd_start_generates_current_ms_id() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"XADD", b"s", b"*", b"f", b"v"]); // => $13\r\n1712345678911-0\r\n
+    assert!(t.client.read_line().starts_with(b"$"));
+    let id = String::from_utf8(t.client.read_line()).unwrap();
+    let (ms, seq) = id.split_once('-').unwrap();
+    let ms:u64 = ms.parse().unwrap();
+    assert!(ms > 1_700_000_000_000, "expected epoch-ms, got {ms}");
+    assert_eq!(seq, "0");
+}
+
+fn parse_id(s: &str) -> (u64, u64) {
+    let (ms, seq) = s.split_once('-').unwrap();
+    (ms.parse().unwrap(), seq.parse().unwrap())
+}
+
+/// Two `*` IDs are strictly increasing.
+#[test]
+fn xadd_star_second_id_is_greater() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"XADD", b"s", b"*", b"f", b"v"]);
+    assert!(t.client.read_line().starts_with(b"$"));
+    let id1 = String::from_utf8(t.client.read_line()).unwrap();
+    t.client.cmd(&[b"XADD", b"s", b"*", b"f", b"v"]);
+    assert!(t.client.read_line().starts_with(b"$"));
+    let id2 = String::from_utf8(t.client.read_line()).unwrap();
+    assert!(parse_id(&id2) > parse_id(&id1), "{id2} !> {id1}");
+}
+
+/// If the last id's ms is in the future (clock skew), `*` bumps the seq
+/// instead of using the current time. Deterministic thanks to the far-future id.
+#[test]
+fn xadd_star_after_future_explicit_uses_last_ms_plus_one() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"9999999999999-0", b"f", b"v"])
+        .expect(b"$15\r\n9999999999999-0\r\n");
+    t.client.cmd(&[b"XADD", b"s", b"*", b"f", b"v"]);
+    assert!(t.client.read_line().starts_with(b"$"));
+    let id = String::from_utf8(t.client.read_line()).unwrap();
+    assert_eq!(id, "9999999999999-1");
 }
