@@ -2151,3 +2151,69 @@ fn xadd_on_expired_key_creates_stream() {
         .cmd(&[b"XADD", b"k", b"0-1", b"f", b"v"])
         .expect(b"$3\r\n0-1\r\n");
 }
+
+#[test]
+fn xadd_error_on_equal_id() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"bar", b"baz"])
+        .expect(b"$3\r\n1-2\r\n");
+
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"baz", b"foo"])
+        .expect_prefix(b"-ERR The ID specified in XADD is equal or smaller than");
+}
+
+/// An ID with a smaller milliseconds value is rejected.
+#[test]
+fn xadd_rejects_smaller_ms() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"f", b"v"])
+        .expect(b"$3\r\n1-2\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-3", b"f", b"v"])
+        .expect(b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+}
+
+/// An ID with the same ms but a smaller sequence number is rejected.
+#[test]
+fn xadd_rejects_smaller_seq() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"f", b"v"])
+        .expect(b"$3\r\n1-2\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-1", b"f", b"v"])
+        .expect(b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+}
+
+/// An ID with a larger milliseconds value is accepted.
+#[test]
+fn xadd_accepts_larger_ms() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"f", b"v"])
+        .expect(b"$3\r\n1-2\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"2-0", b"f", b"v"])
+        .expect(b"$3\r\n2-0\r\n");
+}
+
+/// 0-0 is always invalid.
+#[test]
+fn xadd_rejects_zero_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-0", b"f", b"v"])
+        .expect(b"-ERR The ID specified in XADD must be greater than 0-0\r\n");
+}
+
+/// On an empty stream, 0-1 is the minimum valid ID.
+#[test]
+fn xadd_accepts_min_valid_id_on_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+}

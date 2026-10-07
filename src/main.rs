@@ -529,6 +529,11 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
     let Some(id) = StreamId::parse(id_raw) else {
         return Frame::Err("ERR Invalid stream ID specified as stream command argument".into());
     };
+    // 0-0 is always invalid
+    if id == StreamId(0,0) {
+        return Frame::Err("ERR The ID specified in XADD must be greater than 0-0".into());
+    }
+
     let mut fields = Vec::new();
     for pair in args[3..].chunks(2) {
         let (Some(f), Some(v)) = (bulk(Some(&pair[0])), bulk(Some(&pair[1]))) else {
@@ -542,6 +547,12 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
     let Value::Stream(stream) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
+    if let Some(last) = stream.keys().next_back() {
+        if id <= *last {
+            return Frame::Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
+        }
+    }
+
     stream.insert(id, fields);
     Frame::bulk(id.render())
 }
