@@ -2217,3 +2217,81 @@ fn xadd_accepts_min_valid_id_on_empty() {
         .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
         .expect(b"$3\r\n0-1\r\n");
 }
+
+#[test]
+fn xadd_auto_seq_returns_correct_id() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-*", b"f", b"v"])
+        .expect(b"$3\r\n1-0\r\n")
+        .cmd(&[b"XADD", b"s", b"1-*", b"f", b"v"])
+        .expect(b"$3\r\n1-1\r\n");
+}
+
+/// `0-*` starts the sequence at 1.
+#[test]
+fn xadd_auto_seq_zero_ms_starts_at_one() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-*", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+}
+
+/// A new ms part gets sequence 0, then increments.
+#[test]
+fn xadd_auto_seq_uses_default_for_new_ms() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-*", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"5-*", b"f", b"v"])
+        .expect(b"$3\r\n5-0\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"5-*", b"f", b"v"])
+        .expect(b"$3\r\n5-1\r\n");
+}
+
+/// Auto-seq continues from an explicit entry with the same ms.
+#[test]
+fn xadd_auto_seq_continues_from_explicit() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-2", b"f", b"v"])
+        .expect(b"$3\r\n1-2\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"1-*", b"f", b"v"])
+        .expect(b"$3\r\n1-3\r\n");
+}
+
+/// Auto-seq with a ms below the top is rejected.
+#[test]
+fn xadd_auto_seq_rejects_smaller_ms() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"5-1", b"f", b"v"])
+        .expect(b"$3\r\n5-1\r\n");
+    t.client
+        .cmd(&[b"XADD", b"s", b"3-*", b"f", b"v"])
+        .expect(b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+}
+
+/// A malformed ID must not create the key.
+#[test]
+fn xadd_failed_id_does_not_create_stream() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"badid", b"f", b"v"])
+        .expect(b"-ERR Invalid stream ID specified as stream command argument\r\n");
+    t.client.cmd(&[b"TYPE", b"s"]).expect(b"+none\r\n");
+}
+
+/// A rejected 0-0 must not create the key either.
+#[test]
+fn xadd_zero_zero_does_not_create_stream() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-0", b"f", b"v"])
+        .expect(b"-ERR The ID specified in XADD must be greater than 0-0\r\n");
+    t.client.cmd(&[b"TYPE", b"s"]).expect(b"+none\r\n");
+}

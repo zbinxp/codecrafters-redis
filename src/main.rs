@@ -87,11 +87,11 @@ impl PartialOrd for Score {
 struct StreamId(u64, u64);
 
 impl StreamId {
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        let s = str::from_utf8(bytes).ok()?;
-        let (ms, seq) = s.split_once('-')?;
-        Some(StreamId(ms.parse().ok()?, seq.parse().ok()?))
-    }
+    // fn parse(bytes: &[u8]) -> Option<Self> {
+    //     let s = str::from_utf8(bytes).ok()?;
+    //     let (ms, seq) = s.split_once('-')?;
+    //     Some(StreamId(ms.parse().ok()?, seq.parse().ok()?))
+    // }
 
     fn render(&self) -> String {
         format!("{}-{}", self.0, self.1)
@@ -517,6 +517,22 @@ fn cmd_type(args: &[Frame], store: &mut Store) -> Frame {
     Frame::simple(type_str)
 }
 
+enum IdSpec{
+    Explicit(StreamId),
+    AutoSeq(u64),
+}
+
+fn parse_id_spec(bytes: &[u8]) -> Option<IdSpec> {
+    let s = str::from_utf8(bytes).ok()?;
+    let (ms, seq) = s.split_once('-')?;
+    let ms: u64 = ms.parse().ok()?;
+    if seq == "*" {
+        Some(IdSpec::AutoSeq(ms))
+    }else{
+        Some(IdSpec::Explicit(StreamId(ms, seq.parse().ok()?)))
+    }
+}
+
 /// Spec: XADD key <id> field value [field value …] creates the stream if absent, appends an
 /// entry, and returns the entry ID as a bulk string.
 fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
@@ -526,13 +542,6 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
     let (Some(key), Some(id_raw)) = (bulk(args.get(1)), bulk(args.get(2))) else {
         return Frame::Err("ERR wrong number of arguments for 'xadd' command".into());
     };
-    let Some(id) = StreamId::parse(id_raw) else {
-        return Frame::Err("ERR Invalid stream ID specified as stream command argument".into());
-    };
-    // 0-0 is always invalid
-    if id == StreamId(0,0) {
-        return Frame::Err("ERR The ID specified in XADD must be greater than 0-0".into());
-    }
 
     let mut fields = Vec::new();
     for pair in args[3..].chunks(2) {
@@ -541,18 +550,47 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
         };
         fields.push((f.to_vec(), v.to_vec()));
     }
-    live_entry(store, key);
+
+    // parse auto-generated id
+    let Some(spec) = parse_id_spec(id_raw) else {
+        return Frame::Err("ERR Invalid stream ID specified as stream command argument".into());
+    };
+
+    // peek value to check type
+    let last = match live_entry(store, key) {
+        Some(entry) => match &entry.value {
+            Value::Stream(s) => s.keys().next_back().copied(),
+            _ => return Frame::Err(WRONGTYPE_KEY_WRONG.into()),
+        },
+        None => None,
+    };
+    
+    let id = match spec {
+        IdSpec::Explicit(id) => id,
+        IdSpec::AutoSeq(ms) => {
+            let seq = match last {
+                Some(l) if l.0 == ms => l.1 + 1,
+                _ => if ms == 0 { 1 } else { 0 }
+            };
+            StreamId(ms, seq)
+        }
+    };
+
+    // 0-0 is always invalid
+    if id == StreamId(0,0) {
+        return Frame::Err("ERR The ID specified in XADD must be greater than 0-0".into());
+    }
+
+    if let Some(l) = last {
+        if id <= l {
+            return Frame::Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
+        }
+    }
     let entry = store.data.entry(key.to_vec())
         .or_insert_with(|| Entry::new(Value::Stream(BTreeMap::new())));
     let Value::Stream(stream) = &mut entry.value else {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
-    if let Some(last) = stream.keys().next_back() {
-        if id <= *last {
-            return Frame::Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
-        }
-    }
-
     stream.insert(id, fields);
     Frame::bulk(id.render())
 }
