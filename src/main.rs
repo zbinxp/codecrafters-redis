@@ -650,6 +650,52 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
     Frame::bulk(id.render())
 }
 
+/// Spec: XRANGE key start end returns entries with start ≤ id ≤ end (inclusive), as an array
+/// of [id, [f1, v1, f2, v2, …]] 
+fn cmd_xrange(args: &[Frame], store: &mut Store) -> Frame {
+    if args.len() != 4 {
+        return Frame::Err("ERR wrong number of arguments for 'xrange' command".into());
+    }
+    let (Some(key), Some(start_raw), Some(end_raw)) = 
+        (bulk(args.get(1)), bulk(args.get(2)), bulk(args.get(3))) else {
+        return Frame::Err("ERR wrong number of arguments for 'xrange' command".into());        
+    };
+
+    let (Some(start), Some(end)) = (parse_range_id(start_raw, false),
+        parse_range_id(end_raw, true)) else {
+        return Frame::Err("ERR Invalid stream ID specified as stream command argument".into())
+    };
+
+    let Some(entry) = live_entry(store, key) else {
+        return Frame::Array(Vec::new())
+    };
+    let Value::Stream(stream) = &entry.value else {
+        return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+    };
+    let entries = stream
+        .range(start..=end)
+        .map(|(id,fields)| {
+            let field_array: Vec<Frame> = fields.iter()
+                .flat_map(|(k,v)| [Frame::bulk(k), Frame::bulk(v)])
+                .collect();
+            Frame::Array(vec![Frame::bulk(id.render()), Frame::Array(field_array)])
+        })
+        .collect();
+    Frame::Array(entries)
+}
+
+/// IDs may omit the sequence: start defaults seq to 0, end defaults seq to u64::MAX
+fn parse_range_id(bytes:&[u8], is_end:bool) -> Option<StreamId> {
+    let s = str::from_utf8(bytes).ok()?;
+    match s.split_once('-') {
+        Some((ms,seq)) => Some(StreamId(ms.parse().ok()?, seq.parse().ok()?)),
+        None => {
+            let ms: u64 = s.parse().ok()?;
+            Some(StreamId(ms, if is_end { u64::MAX } else { 0 }))
+        }
+    }
+}
+
 fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
     if len == 0 {
@@ -752,6 +798,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"ZREM" => Some(cmd_zrem),
         b"TYPE" => Some(cmd_type),
         b"XADD" => Some(cmd_xadd),
+        b"XRANGE" => Some(cmd_xrange),
         _ => None,
     }
 }

@@ -2347,3 +2347,100 @@ fn xadd_star_after_future_explicit_uses_last_ms_plus_one() {
     let id = String::from_utf8(t.client.read_line()).unwrap();
     assert_eq!(id, "9999999999999-1");
 }
+
+#[test]
+fn xrange_with_key_range_returns_array() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"XADD", b"s", b"0-1", b"foo", b"10"])
+        .expect(b"$3\r\n0-1\r\n")
+        .cmd(&[b"XADD", b"s", b"0-2", b"bar", b"20"])
+        .expect(b"$3\r\n0-2\r\n")
+        .cmd(&[b"XADD", b"s", b"0-3", b"baz", b"30"])
+        .expect(b"$3\r\n0-3\r\n");
+    t.client.cmd(&[b"XRANGE", b"s", b"0-2", b"0-3"])
+        .expect(b"*2\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$3\r\nbar\r\n$2\r\n20\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$2\r\n30\r\n");
+}
+
+/// Seed stream `s` with 0-1 -> (a,1), 0-2 -> (b,2), 0-3 -> (c,3).
+fn seed_stream(c: &mut Client) {
+    c.cmd(&[b"XADD", b"s", b"0-1", b"a", b"1"])
+        .expect(b"$3\r\n0-1\r\n")
+        .cmd(&[b"XADD", b"s", b"0-2", b"b", b"2"])
+        .expect(b"$3\r\n0-2\r\n")
+        .cmd(&[b"XADD", b"s", b"0-3", b"c", b"3"])
+        .expect(b"$3\r\n0-3\r\n");
+}
+
+/// Omitting the sequence: start -> seq 0, end -> seq MAX.
+#[test]
+fn xrange_optional_seq_defaults() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XRANGE", b"s", b"0", b"0"]).expect(
+        b"*3\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+    );
+}
+
+/// A single-id range returns just that entry.
+#[test]
+fn xrange_single_entry() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client
+        .cmd(&[b"XRANGE", b"s", b"0-2", b"0-2"])
+        .expect(b"*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n");
+}
+
+/// A range with no entries returns an empty array.
+#[test]
+fn xrange_empty_range_returns_empty() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client
+        .cmd(&[b"XRANGE", b"s", b"0-5", b"0-9"])
+        .expect(b"*0\r\n");
+}
+
+/// A missing key returns an empty array.
+#[test]
+fn xrange_missing_key_returns_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XRANGE", b"missing", b"0", b"1"])
+        .expect(b"*0\r\n");
+}
+
+/// XRANGE against a string key is WRONGTYPE.
+#[test]
+fn xrange_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"XRANGE", b"k", b"0", b"1"])
+        .expect(WRONGTYPE);
+}
+
+/// An expired key reads as absent, so XRANGE returns an empty array.
+#[test]
+fn xrange_expired_key_returns_empty() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client
+        .cmd(&[b"XRANGE", b"k", b"0", b"1"])
+        .expect(b"*0\r\n");
+}
+
+/// Multiple fields round-trip in insertion order.
+#[test]
+fn xrange_multi_field_entry() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"t", b"1-0", b"temperature", b"36", b"humidity", b"95"])
+        .expect(b"$3\r\n1-0\r\n");
+    t.client.cmd(&[b"XRANGE", b"t", b"0", b"9"]).expect(
+        b"*1\r\n*2\r\n$3\r\n1-0\r\n*4\r\n$11\r\ntemperature\r\n$2\r\n36\r\n$8\r\nhumidity\r\n$2\r\n95\r\n",
+    );
+}
