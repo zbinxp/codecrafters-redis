@@ -2711,3 +2711,47 @@ fn xread_block_zero_never_times_out() {
         b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\ng\r\n$1\r\nw\r\n",
     );
 }
+
+/// A non-blocking `$` read resolves to the last id, so nothing is new.
+#[test]
+fn xread_dollar_non_blocking_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"s", b"$"])
+        .expect(b"*-1\r\n");
+}
+
+/// A blocking `$` read returns entries added after the command was sent.
+#[test]
+fn xread_block_dollar_returns_new_entry() {
+    let mut t = TestCtx::new();
+    let mut writer = t.connect();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+
+    t.client.cmd(&[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"s", b"$"]);
+    t.client.expect_silent(Duration::from_millis(150));
+
+    writer
+        .cmd(&[b"XADD", b"s", b"0-2", b"g", b"w"])
+        .expect(b"$3\r\n0-2\r\n");
+    t.client.expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\ng\r\n$1\r\nw\r\n",
+    );
+}
+
+/// A blocking `$` read with nothing added times out -> nil.
+#[test]
+fn xread_block_dollar_timeout_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XREAD", b"BLOCK", b"200", b"STREAMS", b"s", b"$"])
+        .expect(b"*-1\r\n");
+}

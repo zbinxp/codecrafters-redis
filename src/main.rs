@@ -709,9 +709,12 @@ fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
     }  
     let n = rest.len() / 2;
     let keys = &rest[..n];
-    let ids = &rest[n..];
-
-    let out = match collect_xread(store, keys, ids) {
+    let ids_raw = &rest[n..];
+    let ids = match resolve_ids(store, keys, ids_raw) {
+        Ok(result) => result,
+        Err(e) => return e,
+    };
+    let out = match collect_xread(store, keys, &ids) {
         Ok(result) => result,
         Err(e) => return e,
     };
@@ -723,18 +726,11 @@ fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
     }
 }
 
-fn collect_xread(store: &mut Store, keys: &[Frame], ids:&[Frame]) -> Result<Vec<Frame>, Frame> {
+fn collect_xread(store: &mut Store, keys: &[Frame], ids:&[StreamId]) -> Result<Vec<Frame>, Frame> {
     let mut out = Vec::new();
-    for (k,i) in keys.iter().zip(ids) {
+    for (k,id) in keys.iter().zip(ids) {
         let Some(key) = bulk(Some(k)) else {
             return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into()))
-        };
-        let Some(id) = bulk(Some(i)) else {
-            return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into()))
-        };
-        let id = match parse_range_id(id, false) {
-            Some(stream_id) => stream_id,
-            _ => return Err(Frame::Err("ERR Invalid stream ID specified as stream command argument".into()))
         };
         let Some(entry) = live_entry(store, key) else {
             continue;
@@ -758,6 +754,29 @@ fn collect_xread(store: &mut Store, keys: &[Frame], ids:&[Frame]) -> Result<Vec<
                 Frame::Array(entries)
             ]));
         }
+    }
+    Ok(out)
+}
+
+fn resolve_ids(store: &mut Store, keys: &[Frame], ids_raw: &[Frame]) -> Result<Vec<StreamId>, Frame> {
+    let mut out = Vec::new();
+    for (k,i) in keys.iter().zip(ids_raw) {
+        let key = bulk(Some(k)).ok_or_else(|| Frame::Err(WRONGTYPE_KEY_WRONG.into()))?;
+        let id_raw = bulk(Some(i)).ok_or_else(||Frame::Err(WRONGTYPE_KEY_WRONG.into()))?;
+        let id = if id_raw == b"$" {
+            // get last id
+            match live_entry(store, key) {
+                Some(entry) => match &entry.value {
+                    Value::Stream(s) => s.keys().next_back().copied().unwrap_or(StreamId(0,0)),
+                    _ => return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into())),
+                },
+                None => StreamId(0, 0)
+            }
+        } else {
+            parse_range_id(id_raw, false)
+            .ok_or_else(||Frame::Err("ERR Invalid stream ID specified as stream command argument".into()))?
+        };
+        out.push(id);
     }
     Ok(out)
 }
@@ -1015,7 +1034,15 @@ where
         }  
         let n = rest.len() / 2;
         let keys = &rest[..n];
-        let ids = &rest[n..];
+        let ids_raw = &rest[n..];
+        let ids = {
+            let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+            match resolve_ids(&mut store, keys, ids_raw) {
+                Ok(results) => results,
+                Err(e) => return e,
+            }
+        };
+
         // single key for blocking
         let Some(channel) = bulk(keys.first()) else {
             return Frame::Err(WRONGTYPE_KEY_WRONG.into())
@@ -1035,10 +1062,11 @@ where
         }
 
         let timeout = block.unwrap();
-
+        
         loop {
             let rx = {
                 let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                
                 let out = match collect_xread(&mut store, &keys, &ids) {
                     Ok(result) =>  result,
                     Err(e) => return e
