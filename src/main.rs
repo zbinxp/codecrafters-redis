@@ -687,6 +687,11 @@ fn cmd_xrange(args: &[Frame], store: &mut Store) -> Frame {
 /// IDs may omit the sequence: start defaults seq to 0, end defaults seq to u64::MAX
 fn parse_range_id(bytes:&[u8], is_end:bool) -> Option<StreamId> {
     let s = str::from_utf8(bytes).ok()?;
+    match s {
+        "-" => return Some(StreamId(0, 0)),
+        "+" => return Some(StreamId(u64::MAX, u64::MAX)),
+        _ => {}
+    }
     match s.split_once('-') {
         Some((ms,seq)) => Some(StreamId(ms.parse().ok()?, seq.parse().ok()?)),
         None => {

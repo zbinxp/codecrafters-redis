@@ -2444,3 +2444,42 @@ fn xrange_multi_field_entry() {
         b"*1\r\n*2\r\n$3\r\n1-0\r\n*4\r\n$11\r\ntemperature\r\n$2\r\n36\r\n$8\r\nhumidity\r\n$2\r\n95\r\n",
     );
 }
+
+/// `-` as the start means "from the beginning of the stream".
+#[test]
+fn xrange_dash_start_returns_from_beginning() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XRANGE", b"s", b"-", b"0-2"]).expect(
+        b"*2\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n",
+    );
+}
+
+/// `-` to `+` returns every entry.
+#[test]
+fn xrange_dash_to_plus_returns_all() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XRANGE", b"s", b"-", b"+"]).expect(
+        b"*3\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+    );
+}
+
+/// `-` with a single-id end.
+#[test]
+fn xrange_dash_start_single_entry() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client
+        .cmd(&[b"XRANGE", b"s", b"-", b"0-1"])
+        .expect(b"*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n");
+}
+
+/// `-` on a missing key returns empty.
+#[test]
+fn xrange_dash_start_missing_key() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XRANGE", b"missing", b"-", b"0-2"])
+        .expect(b"*0\r\n");
+}
