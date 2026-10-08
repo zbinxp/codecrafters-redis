@@ -2483,3 +2483,32 @@ fn xrange_dash_start_missing_key() {
         .cmd(&[b"XRANGE", b"missing", b"-", b"0-2"])
         .expect(b"*0\r\n");
 }
+
+/// `+` as the end means "to the end of the stream".
+#[test]
+fn xrange_plus_end_returns_to_end() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XRANGE", b"s", b"0-2", b"+"]).expect(
+        b"*2\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+    );
+}
+
+/// `+` with a start past the top returns empty.
+#[test]
+fn xrange_plus_after_last_is_empty() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client
+        .cmd(&[b"XRANGE", b"s", b"0-5", b"+"])
+        .expect(b"*0\r\n");
+}
+
+/// `+` on a missing key returns empty.
+#[test]
+fn xrange_plus_missing_key() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XRANGE", b"missing", b"0", b"+"])
+        .expect(b"*0\r\n");
+}
