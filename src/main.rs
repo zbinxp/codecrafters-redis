@@ -642,6 +642,13 @@ fn cmd_xadd(args: &[Frame], store: &mut Store) -> Frame {
         return Frame::Err(WRONGTYPE_KEY_WRONG.into());
     };
     stream.insert(id, fields);
+
+    // notify xread that new value added
+    if let Some(q) = store.waiters.get_mut(key) {
+        while let Some(tx) = q.pop_front() {
+            let _ = tx.send(());
+        }
+    }
     Frame::bulk(id.render())
 }
 
@@ -687,6 +694,10 @@ fn cmd_xrange(args: &[Frame], store: &mut Store) -> Frame {
 ///   ["some_key", [ ["1526985054079-0", [temperature, 37, humidity, 94]] ]]
 /// ]
 /// 
+/// Spec: with BLOCK <ms>:
+/// - entries already exist (> id) → return immediately
+/// - else block; a new XADD before the timeout → return it
+/// - timeout with no data → *-1
 fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
     let Some(pos) = args.iter().position(|a| bulk(Some(a)) == Some(b"STREAMS")) else {
         return Frame::Err("ERR syntax error for 'xread' command".into())
@@ -700,23 +711,36 @@ fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
     let keys = &rest[..n];
     let ids = &rest[n..];
 
+    let out = match collect_xread(store, keys, ids) {
+        Ok(result) => result,
+        Err(e) => return e,
+    };
+
+    if out.is_empty() {
+        Frame::NullArray
+    }else {
+        Frame::Array(out)
+    }
+}
+
+fn collect_xread(store: &mut Store, keys: &[Frame], ids:&[Frame]) -> Result<Vec<Frame>, Frame> {
     let mut out = Vec::new();
     for (k,i) in keys.iter().zip(ids) {
         let Some(key) = bulk(Some(k)) else {
-            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+            return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into()))
         };
         let Some(id) = bulk(Some(i)) else {
-            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+            return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into()))
         };
         let id = match parse_range_id(id, false) {
             Some(stream_id) => stream_id,
-            _ => return Frame::Err("ERR Invalid stream ID specified as stream command argument".into())
+            _ => return Err(Frame::Err("ERR Invalid stream ID specified as stream command argument".into()))
         };
         let Some(entry) = live_entry(store, key) else {
             continue;
         };
         let Value::Stream(stream) = &entry.value else {
-            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+            return Err(Frame::Err(WRONGTYPE_KEY_WRONG.into()))
         };
         let entries: Vec<Frame> = stream
             .range((Excluded(id),Unbounded))
@@ -735,12 +759,7 @@ fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
             ]));
         }
     }
-
-    if out.is_empty() {
-        Frame::NullArray
-    }else {
-        Frame::Array(out)
-    }
+    Ok(out)
 }
 
 /// IDs may omit the sequence: start defaults seq to 0, end defaults seq to u64::MAX
@@ -970,6 +989,9 @@ where
                 if cmd == b"BLPOP" {
                     return vec![blpop(args, self.store.clone()).await];
                 }
+                if cmd == b"XREAD" && bulk(args.get(1)) == Some(b"BLOCK") {
+                    return vec![self.xread_block(args).await];
+                }
                 if cmd == b"SUBSCRIBE" {
                     return self.subscribe(args);
                 }
@@ -980,6 +1002,61 @@ where
         }
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         execute(f, &mut store).into_iter().collect()
+    }
+
+    async fn xread_block(&mut self, args: &[Frame]) -> Frame {
+        let Some(pos) = args.iter().position(|a| bulk(Some(a)) == Some(b"STREAMS")) else {
+            return Frame::Err("ERR syntax error for 'xread' command".into())
+        };
+        let rest = &args[pos+1..];
+        if rest.len() < 2 || rest.len() % 2 != 0 {
+            return Frame::Err("ERR Unbalanced XREAD list of streams: for each stream key an ID or
+    '$' must be specified.".into());
+        }  
+        let n = rest.len() / 2;
+        let keys = &rest[..n];
+        let ids = &rest[n..];
+        // single key for blocking
+        let Some(channel) = bulk(keys.first()) else {
+            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        };
+
+        let block = if bulk(args.get(1)) == Some(b"BLOCK") {
+            let Some(ms) = bulk(args.get(2)).and_then(parse_u64) else {
+                return Frame::Err("ERR timeout is not an integer or out of range".into())
+            };
+            Some(Duration::from_millis(ms))
+        } else {
+            None
+        };
+
+        if block.is_none() {
+            return Frame::Err("ERR missing timeout argument".into())
+        }
+
+        let timeout = block.unwrap();
+
+        loop {
+            let rx = {
+                let mut store = self.store.lock().unwrap_or_else(|e|e.into_inner());
+                let out = match collect_xread(&mut store, &keys, &ids) {
+                    Ok(result) =>  result,
+                    Err(e) => return e
+                };
+                if !out.is_empty() {
+                    return Frame::Array(out)
+                }
+
+                let (tx, rx) = oneshot::channel();
+                store.waiters.entry(channel.to_vec()).or_default().push_back(tx);
+                rx
+            };
+            tokio::select! {
+                _ = rx => continue,
+                _ = sleep(timeout), if !timeout.is_zero() => return Frame::NullArray,
+            }
+        }
+
     }
 
     fn subscribe(&mut self, args: &[Frame]) -> Vec<Frame> {
@@ -1060,6 +1137,10 @@ fn allowed_in_subscribe_mode(cmd: &[u8]) -> bool {
         b"RESET",
     ];
     ALLOWED.iter().any(|a| cmd.eq_ignore_ascii_case(a))
+}
+
+fn parse_u64(bytes: &[u8]) -> Option<u64> {
+    str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 #[tokio::main]

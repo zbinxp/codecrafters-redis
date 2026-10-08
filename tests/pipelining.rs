@@ -2627,3 +2627,67 @@ fn xread_multiple_streams_preserves_order() {
             b"*2\r\n*2\r\n$16\r\nother_stream_key\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$8\r\nhumidity\r\n$2\r\n97\r\n*2\r\n$10\r\nstream_key\r\n*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
         );
 }
+
+/// A blocking XREAD returns immediately if entries already exist.
+#[test]
+fn xread_block_returns_immediately_when_data_exists() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XREAD", b"BLOCK", b"1000", b"STREAMS", b"s", b"0-0"])
+        .expect(b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
+}
+
+/// A blocking XREAD wakes when another client XADDs within the timeout.
+#[test]
+fn xread_block_wakes_on_xadd() {
+    let mut t = TestCtx::new();
+    let mut writer = t.connect();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+
+    t.client.cmd(&[b"XREAD", b"BLOCK", b"1000", b"STREAMS", b"s", b"0-1"]);
+    t.client.expect_silent(Duration::from_millis(150));
+
+    writer
+        .cmd(&[b"XADD", b"s", b"0-2", b"g", b"w"])
+        .expect(b"$3\r\n0-2\r\n");
+    t.client.expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\ng\r\n$1\r\nw\r\n",
+    );
+}
+
+/// BLOCK 0 waits indefinitely until an entry arrives.
+#[test]
+fn xread_block_zero_waits_until_data() {
+    let mut t = TestCtx::new();
+    let mut writer = t.connect();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+
+    t.client.cmd(&[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"s", b"0-1"]);
+    t.client.expect_silent(Duration::from_millis(150));
+
+    writer
+        .cmd(&[b"XADD", b"s", b"0-2", b"g", b"w"])
+        .expect(b"$3\r\n0-2\r\n");
+    t.client.expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\ng\r\n$1\r\nw\r\n",
+    );
+}
+
+/// Once the timeout elapses with no new entry, the reply is nil.
+#[test]
+fn xread_block_timeout_returns_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    t.client
+        .cmd(&[b"XREAD", b"BLOCK", b"200", b"STREAMS", b"s", b"0-1"])
+        .expect(b"*-1\r\n");
+}
