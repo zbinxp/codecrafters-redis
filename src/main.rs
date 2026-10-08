@@ -1,10 +1,5 @@
 use std::{
-    cmp::{Ordering, min},
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    io,
-    sync::{Arc, Mutex, atomic::AtomicU64},
-    time::{Duration, Instant},
-    vec,
+    cmp::{Ordering, min}, collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque}, io, ops::Bound::{Excluded, Unbounded}, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, Instant}, vec,
 };
 
 use bytes::BytesMut;
@@ -684,6 +679,70 @@ fn cmd_xrange(args: &[Frame], store: &mut Store) -> Frame {
     Frame::Array(entries)
 }
 
+/// Spec: XREAD STREAMS <key> <id> — exclusive (entries with id strictly greater than the given
+/// one)
+/// 
+/// XREAD STREAMS some_key 1526985054069-0 →
+/// [
+///   ["some_key", [ ["1526985054079-0", [temperature, 37, humidity, 94]] ]]
+/// ]
+/// 
+fn cmd_xread(args:&[Frame], store:&mut Store) -> Frame {
+    let Some(pos) = args.iter().position(|a| bulk(Some(a)) == Some(b"STREAMS")) else {
+        return Frame::Err("ERR syntax error for 'xread' command".into())
+    };
+    let rest = &args[pos+1..];
+    if rest.len() < 2 || rest.len() % 2 != 0 {
+        return Frame::Err("ERR Unbalanced XREAD list of streams: for each stream key an ID or
+ '$' must be specified.".into());
+    }  
+    let n = rest.len() / 2;
+    let keys = &rest[..n];
+    let ids = &rest[n..];
+
+    let mut out = Vec::new();
+    for (k,i) in keys.iter().zip(ids) {
+        let Some(key) = bulk(Some(k)) else {
+            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        };
+        let Some(id) = bulk(Some(i)) else {
+            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        };
+        let id = match parse_range_id(id, false) {
+            Some(stream_id) => stream_id,
+            _ => return Frame::Err("ERR Invalid stream ID specified as stream command argument".into())
+        };
+        let Some(entry) = live_entry(store, key) else {
+            continue;
+        };
+        let Value::Stream(stream) = &entry.value else {
+            return Frame::Err(WRONGTYPE_KEY_WRONG.into())
+        };
+        let entries: Vec<Frame> = stream
+            .range((Excluded(id),Unbounded))
+            .map(|(id, fields)| {
+                let flat:Vec<Frame> = fields.iter()
+                    .flat_map(|(f,v)| [Frame::bulk(f), Frame::bulk(v)])
+                    .collect();
+                Frame::Array(vec![Frame::bulk(id.render()), Frame::Array(flat)])
+            })
+            .collect();
+
+        if !entries.is_empty() {
+            out.push(Frame::Array(vec![
+                Frame::bulk(key),
+                Frame::Array(entries)
+            ]));
+        }
+    }
+
+    if out.is_empty() {
+        Frame::NullArray
+    }else {
+        Frame::Array(out)
+    }
+}
+
 /// IDs may omit the sequence: start defaults seq to 0, end defaults seq to u64::MAX
 fn parse_range_id(bytes:&[u8], is_end:bool) -> Option<StreamId> {
     let s = str::from_utf8(bytes).ok()?;
@@ -804,6 +863,7 @@ fn lookup(name: &[u8]) -> Option<Handler> {
         b"TYPE" => Some(cmd_type),
         b"XADD" => Some(cmd_xadd),
         b"XRANGE" => Some(cmd_xrange),
+        b"XREAD" => Some(cmd_xread),
         _ => None,
     }
 }

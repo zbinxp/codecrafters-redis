@@ -2512,3 +2512,63 @@ fn xrange_plus_missing_key() {
         .cmd(&[b"XRANGE", b"missing", b"0", b"+"])
         .expect(b"*0\r\n");
 }
+
+#[test]
+fn xrange_stream_missing_key() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"missing", b"0-0"])
+        .expect(b"*-1\r\n");
+}
+
+/// XREAD returns exactly the entries with id > the given id.
+#[test]
+fn xread_returns_entries_after_id() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XREAD", b"STREAMS", b"s", b"0-0"]).expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*3\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+    );
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"s", b"0-2"])
+        .expect(b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n");
+}
+
+/// XREAD is exclusive: at the last id there is nothing new, so it returns nil.
+#[test]
+fn xread_no_new_entries_returns_null() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"s", b"0-3"])
+        .expect(b"*-1\r\n");
+}
+
+/// A bare `<ms>` id is treated as `<ms>-0`.
+#[test]
+fn xread_accepts_ms_without_seq() {
+    let mut t = TestCtx::new();
+    seed_stream(&mut t.client);
+    t.client.cmd(&[b"XREAD", b"STREAMS", b"s", b"0"]).expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*3\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+    );
+}
+
+/// XREAD against a string key is WRONGTYPE.
+#[test]
+fn xread_on_string_key_returns_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"k", b"0-0"])
+        .expect(WRONGTYPE);
+}
+
+/// XREAD requires the STREAMS keyword.
+#[test]
+fn xread_without_streams_returns_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"XREAD", b"s", b"0-0"])
+        .expect(b"-ERR syntax error for 'xread' command\r\n");
+}
