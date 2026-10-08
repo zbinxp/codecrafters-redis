@@ -4,12 +4,11 @@
 > Order verified against `codecrafters task -stage +N` (boundaries: cc3, fn4, ic1, jn4).
 > Source: codecrafters-io/build-your-own-redis course-definition. Generated: 2026-09-27.
 >
-> **Progress: 34 done.** core #1–7, Lists #8–18, `cc3` #19.
-> Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** (before
-> the backfill below) and are already done.
-> **Backfilling now:** Streams #20–31 → Transactions #32–42 → Optimistic Locking
-> #43–50 → Replication #51–68 → RDB #69–74 → AOF #75–84.
-> **NEXT: `cf6` — Create a stream (#20).**
+> **Progress: 46 done.** core #1–7, Lists #8–18, Streams #19–31.
+> Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** and are done.
+> **Backfilling now:** Transactions #32–42 → Optimistic Locking #43–50 →
+> Replication #51–68 → RDB #69–74 → AOF #75–84.
+> **NEXT: `si4` — The INCR command (1/3) (#32).**
 
 | # | Stage | Slug | Group | Status |
 |---|-------|------|-------|--------|
@@ -32,19 +31,19 @@
 | 17 | Blocking retrieval | `ec3` | Lists | done |
 | 18 | Blocking retrieval with timeout | `xj7` | Lists | done |
 | 19 | The TYPE command | `cc3` | Streams | done |
-| 20 | Create a stream | `cf6` | Streams | **NEXT** |
-| 21 | Validating entry IDs | `hq8` | Streams |  |
-| 22 | Partially auto-generated IDs | `yh3` | Streams |  |
-| 23 | Fully auto-generated IDs | `xu6` | Streams |  |
-| 24 | Query entries from stream | `zx1` | Streams |  |
-| 25 | Query with - | `yp1` | Streams |  |
-| 26 | Query with + | `fs1` | Streams |  |
-| 27 | Query single stream using XREAD | `um0` | Streams |  |
-| 28 | Query multiple streams using XREAD | `ru9` | Streams |  |
-| 29 | Blocking reads | `bs1` | Streams |  |
-| 30 | Blocking reads without timeout | `hw1` | Streams |  |
-| 31 | Blocking reads using $ | `xu1` | Streams |  |
-| 32 | The INCR command (1/3) | `si4` | Transactions |  |
+| 20 | Create a stream | `cf6` | Streams | done |
+| 21 | Validating entry IDs | `hq8` | Streams | done |
+| 22 | Partially auto-generated IDs | `yh3` | Streams | done |
+| 23 | Fully auto-generated IDs | `xu6` | Streams | done |
+| 24 | Query entries from stream | `zx1` | Streams | done |
+| 25 | Query with - | `yp1` | Streams | done |
+| 26 | Query with + | `fs1` | Streams | done |
+| 27 | Query single stream using XREAD | `um0` | Streams | done |
+| 28 | Query multiple streams using XREAD | `ru9` | Streams | done |
+| 29 | Blocking reads | `bs1` | Streams | done |
+| 30 | Blocking reads without timeout | `hw1` | Streams | done |
+| 31 | Blocking reads using $ | `xu1` | Streams | done |
+| 32 | The INCR command (1/3) | `si4` | Transactions | **NEXT** |
 | 33 | The INCR command (2/3) | `lz8` | Transactions |  |
 | 34 | The INCR command (3/3) | `mk1` | Transactions |  |
 | 35 | The MULTI command | `pn0` | Transactions |  |
