@@ -2691,3 +2691,23 @@ fn xread_block_timeout_returns_null() {
         .cmd(&[b"XREAD", b"BLOCK", b"200", b"STREAMS", b"s", b"0-1"])
         .expect(b"*-1\r\n");
 }
+
+/// BLOCK 0 must not time out: stay silent well past a normal timeout, then wake.
+#[test]
+fn xread_block_zero_never_times_out() {
+    let mut t = TestCtx::new();
+    let mut writer = t.connect();
+    t.client
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+
+    t.client.cmd(&[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"s", b"0-1"]);
+    t.client.expect_silent(Duration::from_millis(600));
+
+    writer
+        .cmd(&[b"XADD", b"s", b"0-2", b"g", b"w"])
+        .expect(b"$3\r\n0-2\r\n");
+    t.client.expect(
+        b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$1\r\ng\r\n$1\r\nw\r\n",
+    );
+}
