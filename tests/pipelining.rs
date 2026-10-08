@@ -2572,3 +2572,58 @@ fn xread_without_streams_returns_error() {
         .cmd(&[b"XREAD", b"s", b"0-0"])
         .expect(b"-ERR syntax error for 'xread' command\r\n");
 }
+
+/// Seed `stream_key` with (0-1, temperature 95) and `other_stream_key` with
+/// (0-2, humidity 97).
+fn seed_two_streams(c: &mut Client) {
+    c.cmd(&[b"XADD", b"stream_key", b"0-1", b"temperature", b"95"])
+        .expect(b"$3\r\n0-1\r\n")
+        .cmd(&[b"XADD", b"other_stream_key", b"0-2", b"humidity", b"97"])
+        .expect(b"$3\r\n0-2\r\n");
+}
+
+/// XREAD across multiple streams returns each stream's new entries, in order.
+#[test]
+fn xread_multiple_streams() {
+    let mut t = TestCtx::new();
+    seed_two_streams(&mut t.client);
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"stream_key", b"other_stream_key", b"0-0", b"0-1"])
+        .expect(
+            b"*2\r\n*2\r\n$10\r\nstream_key\r\n*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n*2\r\n$16\r\nother_stream_key\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$8\r\nhumidity\r\n$2\r\n97\r\n",
+        );
+}
+
+/// Streams with nothing new are omitted from the reply.
+#[test]
+fn xread_multiple_streams_skip_empty() {
+    let mut t = TestCtx::new();
+    seed_two_streams(&mut t.client);
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"stream_key", b"other_stream_key", b"0-1", b"0-0"])
+        .expect(
+            b"*1\r\n*2\r\n$16\r\nother_stream_key\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$8\r\nhumidity\r\n$2\r\n97\r\n",
+        );
+}
+
+/// If no stream has new entries, the reply is nil.
+#[test]
+fn xread_multiple_streams_all_empty_returns_null() {
+    let mut t = TestCtx::new();
+    seed_two_streams(&mut t.client);
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"stream_key", b"other_stream_key", b"0-9", b"0-9"])
+        .expect(b"*-1\r\n");
+}
+
+/// The reply preserves the order the streams were requested in.
+#[test]
+fn xread_multiple_streams_preserves_order() {
+    let mut t = TestCtx::new();
+    seed_two_streams(&mut t.client);
+    t.client
+        .cmd(&[b"XREAD", b"STREAMS", b"other_stream_key", b"stream_key", b"0-0", b"0-0"])
+        .expect(
+            b"*2\r\n*2\r\n$16\r\nother_stream_key\r\n*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$8\r\nhumidity\r\n$2\r\n97\r\n*2\r\n$10\r\nstream_key\r\n*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
+        );
+}
