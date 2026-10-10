@@ -68,6 +68,13 @@ impl Frame {
         Self::BulkString(data.as_ref().to_vec())
     }
 
+    pub fn as_bulk(&self) -> Option<&[u8]> {
+        match self {
+            Frame::BulkString(b) => Some(b),
+            _ => None,
+        }
+    }
+
     /// Convenience constructor: build a simple string from any byte-like source.
     pub fn simple(data: impl AsRef<[u8]>) -> Self {
         Self::SimpleString(data.as_ref().to_vec())

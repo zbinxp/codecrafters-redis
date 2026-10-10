@@ -734,7 +734,7 @@ fn lpush_less_args_return_wrong_number_of_arguments() {
     let mut t = TestCtx::new();
     t.client
         .cmd(&[b"LPUSH", b"k"])
-        .expect(b"-ERR wrong number of arguments for 'lpush'\r\n");
+        .expect(b"-ERR wrong number of arguments for 'lpush' command\r\n");
 }
 
 /// The exact spec flow: two LPUSH commands onto the same key, then LRANGE.
