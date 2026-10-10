@@ -2799,3 +2799,22 @@ fn incr_preserves_ttl() {
 
     t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
 }
+
+#[test]
+fn multi_returns_ok() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+}
+
+#[test]
+fn exec_without_multi_returns_error() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"EXEC"]).expect(b"-ERR EXEC without MULTI\r\n");
+}
+
+#[test]
+fn multi_then_exec_returns_empty_array() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*0\r\n");
+}

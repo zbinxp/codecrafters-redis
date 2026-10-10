@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::db::Outbox;
+use crate::{db::Outbox, resp::Frame};
 
 /// State that lives for the lifetime of one client connection.
 ///
@@ -15,6 +15,8 @@ pub struct Conn {
     pub subscriptions: HashSet<Vec<u8>>,
     /// Writer side of this connection's outgoing queue.
     pub out_tx: Outbox,
+    // None = no transaction
+    pub multi: Option<Vec<Frame>>,
 }
 
 impl Conn {
@@ -23,6 +25,7 @@ impl Conn {
             id,
             subscriptions: HashSet::new(),
             out_tx,
+            multi : None,
         }
     }
 }

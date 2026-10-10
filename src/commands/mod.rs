@@ -4,6 +4,7 @@ mod pubsub;
 mod stream;
 mod string;
 mod zset;
+mod transaction;
 
 use std::cmp::min;
 
@@ -46,9 +47,11 @@ pub use pubsub::cmd_unsubscribe;
 pub use stream::cmd_xadd;
 pub use stream::cmd_xrange;
 pub use stream::cmd_xread;
-
 pub use stream::collect_xread;
 pub use stream::resolve_ids;
+
+pub use transaction::cmd_multi;
+pub use transaction::cmd_exec;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)

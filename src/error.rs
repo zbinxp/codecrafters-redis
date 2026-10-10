@@ -78,4 +78,8 @@ impl RedisError {
     pub(crate) fn increment_overflow() -> Self {
         RedisError { message: "ERR increment or decrement would overflow".into() }
     }
+
+    pub(crate) fn exec_without_multi() -> Self {
+        RedisError { message: "ERR EXEC without MULTI".into() }
+    }
 }

@@ -1,8 +1,9 @@
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_echo, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_ping,
-    cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_xadd,
-    cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
+    CmdResult, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange,
+    cmd_multi, cmd_ping, cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe,
+    cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem,
+    cmd_zscore,
 };
 use crate::db::Store;
 use crate::error::RedisError;
@@ -39,6 +40,8 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"XADD" => Some(cmd_xadd),
         b"XRANGE" => Some(cmd_xrange),
         b"XREAD" => Some(cmd_xread),
+        b"MULTI" => Some(cmd_multi),
+        b"EXEC" => Some(cmd_exec),
         _ => None,
     }
 }
