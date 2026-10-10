@@ -52,6 +52,7 @@ pub use stream::resolve_ids;
 
 pub use transaction::cmd_multi;
 pub use transaction::cmd_exec;
+pub use transaction::cmd_discard;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)

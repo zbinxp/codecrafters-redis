@@ -82,4 +82,8 @@ impl RedisError {
     pub(crate) fn exec_without_multi() -> Self {
         RedisError { message: "ERR EXEC without MULTI".into() }
     }
+
+    pub(crate) fn discard_without_multi() -> Self {
+       RedisError { message: "ERR DISCARD without MULTI".into() }
+    }
 }

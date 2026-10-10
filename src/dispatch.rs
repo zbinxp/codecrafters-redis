@@ -1,9 +1,6 @@
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange,
-    cmd_multi, cmd_ping, cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe,
-    cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem,
-    cmd_zscore,
+    CmdResult, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::Store;
 use crate::error::RedisError;
@@ -42,6 +39,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"XREAD" => Some(cmd_xread),
         b"MULTI" => Some(cmd_multi),
         b"EXEC" => Some(cmd_exec),
+        b"DISCARD" => Some(cmd_discard),
         _ => None,
     }
 }
@@ -89,8 +87,26 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
         }
     }
 
+    // multi mode: all command allowed for now
+    if let Some(queue) = conn.multi.as_mut() {
+        if !is_transaction_control(name) {
+            queue.push(req.clone());
+            return Ok(vec![Frame::simple("QUEUED")])
+        }
+    }
+
     match lookup(name) {
         Some(handler) => handler(args, conn, store),
         None => Err(RedisError::unknown_command(&String::from_utf8_lossy(name))),
     }
+}
+
+fn is_transaction_control(name:&[u8]) -> bool {
+    [
+        b"MULTI".as_slice(), 
+        b"EXEC",
+        b"DISCARD",
+        b"WATCH",
+        b"UNWATCH"
+    ].iter().any(|c| name.eq_ignore_ascii_case(c))
 }

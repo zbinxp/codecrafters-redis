@@ -2818,3 +2818,119 @@ fn multi_then_exec_returns_empty_array() {
     t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
     t.client.cmd(&[b"EXEC"]).expect(b"*0\r\n");
 }
+
+#[test]
+fn commands_are_queued_until_exec() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"41"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+
+    // 另一条连接看不到 foo —— 入队不能改库
+    let mut other = t.connect();
+    other.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n");
+}
+
+#[test]
+fn multi_then_blpop_returns_queued() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"BLPOP", b"k", b"0"]).expect(b"+QUEUED\r\n");
+}
+
+#[test]
+fn exec_runs_queued_commands() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"6"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*2\r\n+OK\r\n:7\r\n");
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n7\r\n");
+    t.client.cmd(&[b"PING"]).expect(b"+PONG\r\n");   // 事务已结束
+}
+
+/// The full flow from the fy6 spec: four queued commands, one response each,
+/// and the result visible on another connection afterwards.
+#[test]
+fn exec_matches_official_flow() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"6"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"bar"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"GET", b"bar"]).expect(b"+QUEUED\r\n");
+    t.client
+        .cmd(&[b"EXEC"])
+        .expect(b"*4\r\n+OK\r\n:7\r\n:1\r\n$1\r\n1\r\n");
+
+    let mut other = t.connect();
+    other.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n7\r\n");
+}
+
+/// A command that fails during EXEC contributes an error element to the reply
+/// array, but the remaining queued commands still run.
+#[test]
+fn exec_keeps_going_after_a_command_errors() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"n", b"abc"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"SET", b"ok", b"1"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"n"]).expect(b"+QUEUED\r\n");
+    t.client
+        .cmd(&[b"EXEC"])
+        .expect(b"*3\r\n+OK\r\n+OK\r\n-ERR value is not an integer or out of range\r\n");
+
+    // The failed command did not stop the rest of the transaction.
+    t.client.cmd(&[b"GET", b"ok"]).expect(b"$1\r\n1\r\n");
+}
+
+#[test]
+fn discard_aborts_the_transaction() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"41"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"DISCARD"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n");          // 队列被丢弃
+    t.client.cmd(&[b"DISCARD"]).expect(b"-ERR DISCARD without MULTI\r\n");
+}
+
+/// sg9: a command that fails during EXEC contributes an error element to the
+/// reply, and the commands after it still run.
+#[test]
+fn exec_collects_errors_without_aborting() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"foo", b"abc"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"41"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"INCR", b"bar"]).expect(b"+QUEUED\r\n");
+    t.client
+        .cmd(&[b"EXEC"])
+        .expect(b"*2\r\n-ERR value is not an integer or out of range\r\n:42\r\n");
+
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nabc\r\n");
+    t.client.cmd(&[b"GET", b"bar"]).expect(b"$2\r\n42\r\n");
+}
+
+/// jf8: two connections may each hold their own open transaction; their queues
+/// are independent, and the committed effects are serialised through the store.
+#[test]
+fn concurrent_transactions_have_separate_queues() {
+    let mut t = TestCtx::new();
+    let mut a = t.connect();
+    let mut b = t.connect();
+
+    a.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    a.cmd(&[b"SET", b"foo", b"41"]).expect(b"+QUEUED\r\n");
+    a.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+
+    b.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    b.cmd(&[b"INCR", b"foo"]).expect(b"+QUEUED\r\n");
+
+    a.cmd(&[b"EXEC"]).expect(b"*2\r\n+OK\r\n:42\r\n");
+    b.cmd(&[b"EXEC"]).expect(b"*1\r\n:43\r\n");
+
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$2\r\n43\r\n");
+}
+

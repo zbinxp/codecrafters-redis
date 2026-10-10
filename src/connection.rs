@@ -87,9 +87,10 @@ where
     /// [`execute`] table. They are only reachable outside subscribe mode; while
     /// subscribed, `execute` rejects them through its allow-list.
     async fn generate_reply(&mut self, f: &Frame) -> Result<Vec<Frame>, RedisError> {
-        if self.conn.subscriptions.is_empty() {
+        if self.conn.multi.is_none() && self.conn.subscriptions.is_empty() {
             if let Frame::Array(args) = f {
                 if let Some(cmd) = args.first().and_then(Frame::as_bulk) {
+                    // async mode command
                     if cmd == b"BLPOP" {
                         return Ok(vec![blpop(args, self.store.clone()).await?]);
                     }
