@@ -1,18 +1,19 @@
+use crate::client::Conn;
 use crate::commands::{
-    cmd_echo, cmd_get, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_ping, cmd_publish, cmd_rpush,
-    cmd_set, cmd_type, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank,
-    cmd_zrem, cmd_zscore,
+    CmdResult, cmd_echo, cmd_get, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_ping, cmd_publish,
+    cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_xadd, cmd_xrange, cmd_xread,
+    cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::Store;
 use crate::error::RedisError;
 use crate::resp::Frame;
+
 /// A command handler receives the full argument list (index 0 is the command
-/// name) and produces a reply.
-type Handler = fn(&[Frame], &mut Store) -> Result<Frame, RedisError>;
-// type CmdResult = Result<Vec<Frame>, RedisError>;
+/// name), the connection state, and the store, and produces zero or more
+/// replies.
+type Handler = fn(&[Frame], &mut Conn, &mut Store) -> CmdResult;
 
-
-/// Map a command name to its handler. Adding a command is a one-line change
+/// Map a command name to its handler. Adding a command is a one-line change.
 pub fn lookup(name: &[u8]) -> Option<Handler> {
     match name {
         b"PING" | b"COMMAND" => Some(cmd_ping),
@@ -26,6 +27,8 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"LLEN" => Some(cmd_llen),
         b"LPOP" => Some(cmd_lpop),
         b"PUBLISH" => Some(cmd_publish),
+        b"SUBSCRIBE" => Some(cmd_subscribe),
+        b"UNSUBSCRIBE" => Some(cmd_unsubscribe),
         b"ZADD" => Some(cmd_zadd),
         b"ZRANK" => Some(cmd_zrank),
         b"ZRANGE" => Some(cmd_zrange),
@@ -39,20 +42,51 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
     }
 }
 
-/// Turn a client request into a reply.
+/// Commands permitted while the connection is in subscribe mode.
+fn allowed_in_subscribe_mode(cmd: &[u8]) -> bool {
+    const ALLOWED: &[&[u8]] = &[
+        b"SUBSCRIBE",
+        b"UNSUBSCRIBE",
+        b"PSUBSCRIBE",
+        b"PUNSUBSCRIBE",
+        b"PING",
+        b"QUIT",
+        b"RESET",
+    ];
+    ALLOWED.iter().any(|a| cmd.eq_ignore_ascii_case(a))
+}
+
+/// Turn a client request into zero or more replies.
 ///
-/// Returns empty array when the frame carries no command at all (e.g. `*0\r\n`),
-/// which must be silently ignored while the connection stays open -- so empty array
-/// means "no reply", not "unknown command".
-pub fn execute(req: &Frame, store: &mut Store) -> Result<Vec<Frame>, RedisError> {
+/// Returns an empty vec when the frame carries no command at all (e.g. `*0\r\n`),
+/// which must be silently ignored while the connection stays open -- empty means
+/// "no reply", not "unknown command".
+pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
     let Frame::Array(args) = req else {
         return Err(RedisError::not_array_args());
     };
-    let Some(Frame::BulkString(name)) = args.first() else {
-        return Ok(Vec::new());    // *0 / 首元素非 bulk → 静默，无回复
+    let Some(name) = args.first().and_then(Frame::as_bulk) else {
+        return Ok(Vec::new()); // *0 / first arg not a bulk string -> silent
     };
+
+    // Subscribe mode restricts which commands may run and turns PING into a
+    // two-element ["pong", msg] array.
+    if !conn.subscriptions.is_empty() {
+        if !allowed_in_subscribe_mode(name) {
+            let name = String::from_utf8_lossy(name).to_lowercase();
+            return Err(RedisError::not_allowed_in_subscribe_mode(&name));
+        }
+        if name.eq_ignore_ascii_case(b"PING") {
+            let msg = args.get(1).and_then(Frame::as_bulk).unwrap_or(b"");
+            return Ok(vec![Frame::Array(vec![
+                Frame::bulk("pong"),
+                Frame::bulk(msg),
+            ])]);
+        }
+    }
+
     match lookup(name) {
-        Some(handler) => Ok(vec![handler(args, store)?]),
+        Some(handler) => handler(args, conn, store),
         None => Err(RedisError::unknown_command(&String::from_utf8_lossy(name))),
     }
 }

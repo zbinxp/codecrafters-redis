@@ -7,6 +7,15 @@ mod zset;
 
 use std::cmp::min;
 
+use crate::error::RedisError;
+use crate::resp::Frame;
+
+/// What a command handler returns: zero or more RESP frames.
+///
+/// A command that produces no reply (e.g. `*0`) returns an empty vec; a normal
+/// reply wraps one frame. `SUBSCRIBE` to N channels yields N frames.
+pub type CmdResult = Result<Vec<Frame>, RedisError>;
+
 //re-export
 pub use connection::cmd_echo;
 pub use connection::cmd_ping;
@@ -30,6 +39,8 @@ pub use zset::cmd_zrem;
 pub use zset::cmd_zscore;
 
 pub use pubsub::cmd_publish;
+pub use pubsub::cmd_subscribe;
+pub use pubsub::cmd_unsubscribe;
 
 pub use stream::cmd_xadd;
 pub use stream::cmd_xrange;
@@ -38,7 +49,9 @@ pub use stream::cmd_xread;
 pub use stream::collect_xread;
 pub use stream::resolve_ids;
 
-use crate::resp::Frame;
+pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
+    args.get(i).and_then(Frame::as_bulk)
+}
 
 pub fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
     let len = len as i64;
@@ -60,8 +73,4 @@ pub fn resolve_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)
     }
     let stop = min(stop, len - 1);
     Some((start as usize, stop as usize))
-}
-
-pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
-    args.get(i).and_then(Frame::as_bulk)
 }

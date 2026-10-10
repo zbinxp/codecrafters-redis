@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Unbounded};
-use crate::commands::bulk_at;
+use crate::client::Conn;
+use crate::commands::{CmdResult, bulk_at};
 use crate::error::RedisError;
 use crate::resp::Frame;
 use crate::db::{Entry, IdSpec, Store, StreamId, Value};
 use crate::util::now_ms;
 /// Spec: XADD key <id> field value [field value …] creates the stream if absent, appends an
 /// entry, and returns the entry ID as a bulk string.
-pub fn cmd_xadd(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_xadd(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() < 5 || (args.len() - 3) % 2 != 0 {
         return Err(RedisError::wrong_args("xadd"))
     }
@@ -86,12 +87,12 @@ pub fn cmd_xadd(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
             let _ = tx.send(());
         }
     }
-    Ok(Frame::bulk(id.render()))
+    Ok(vec![Frame::bulk(id.render())])
 }
 
 /// Spec: XRANGE key start end returns entries with start ≤ id ≤ end (inclusive), as an array
 /// of [id, [f1, v1, f2, v2, …]] 
-pub fn cmd_xrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_xrange(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() != 4 {
         return Err(RedisError::wrong_args("xrange"))
     }
@@ -106,7 +107,7 @@ pub fn cmd_xrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError>
     };
 
     let Some(entry) = store.live_entry(key) else {
-        return Ok(Frame::Array(Vec::new()))
+        return Ok(vec![Frame::Array(Vec::new())])
     };
     let Value::Stream(stream) = &entry.value else {
         return Err(RedisError::wrong_type())
@@ -120,7 +121,7 @@ pub fn cmd_xrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError>
             Frame::Array(vec![Frame::bulk(id.render()), Frame::Array(field_array)])
         })
         .collect();
-    Ok(Frame::Array(entries))
+    Ok(vec![Frame::Array(entries)])
 }
 
 /// Spec: XREAD STREAMS <key> <id> — exclusive (entries with id strictly greater than the given
@@ -135,7 +136,7 @@ pub fn cmd_xrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError>
 /// - entries already exist (> id) → return immediately
 /// - else block; a new XADD before the timeout → return it
 /// - timeout with no data → *-1
-pub fn cmd_xread(args:&[Frame], store:&mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_xread(args:&[Frame], _conn: &mut Conn, store:&mut Store) -> CmdResult {
     let Some(pos) = args.iter().position(|a| a.as_bulk() == Some(b"STREAMS")) else {
         return Err(RedisError::xread_syntax())
     };
@@ -148,13 +149,13 @@ pub fn cmd_xread(args:&[Frame], store:&mut Store) -> Result<Frame,RedisError> {
     let ids_raw = &rest[n..];
     let ids = resolve_ids(store, keys, ids_raw)?;
     let out = collect_xread(store, keys, &ids)?;
-    Ok(
+    Ok(vec![
         if out.is_empty() {
             Frame::NullArray
         }else {
             Frame::Array(out)
         }
-    )
+    ])
 }
 
 pub fn collect_xread(store: &mut Store, keys: &[Frame], ids:&[StreamId]) -> Result<Vec<Frame>, RedisError> {

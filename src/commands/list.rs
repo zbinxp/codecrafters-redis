@@ -4,7 +4,8 @@ use std::{sync::{Arc, Mutex}, time::{Duration}};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
-use crate::commands::{bulk_at, resolve_range};
+use crate::client::Conn;
+use crate::commands::{CmdResult, bulk_at, resolve_range};
 use crate::db::{Store, Value, Entry};
 use crate::error::RedisError;
 use crate::resp::Frame;
@@ -12,12 +13,12 @@ use crate::util::{self, parse};
 
 /// Spec: RPUSH <key> <element> appends to a list (creating it if absent), and returns the list length as a RESP
 /// integer
-pub fn cmd_rpush(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_rpush(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     push_impl(args, store, "rpush", VecDeque::push_back)
 }
 
 /// Spec: LPUSH key elem [elem...] prepends elements to the list, returning the new length.
-pub fn cmd_lpush(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_lpush(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     push_impl(args, store, "lpush", VecDeque::push_front)
 }
 
@@ -26,7 +27,7 @@ fn push_impl(
     store: &mut Store,
     fn_name: &str,
     push: fn(&mut VecDeque<Vec<u8>>, Vec<u8>),
-) -> Result<Frame,RedisError> {
+) -> CmdResult {
     if args.len() < 3 {
         return Err(RedisError::wrong_args(fn_name))
     }
@@ -59,12 +60,12 @@ fn push_impl(
             }
         }
     }
-    Ok(Frame::Int(list.len() as i64))
+    Ok(vec![Frame::Int(list.len() as i64)])
 }
 
 /// Spec: LRANGE key start stop returns a RESP array of the list elements from start to stop,
 /// stop inclusive
-pub fn cmd_lrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_lrange(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() < 4 {
         return Err(RedisError::wrong_args("lrange"))
     }
@@ -76,7 +77,7 @@ pub fn cmd_lrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError>
     };
 
     let Some(entry) = store.data.get(key) else {
-        return Ok(Frame::Array(Vec::new()))
+        return Ok(vec![Frame::Array(Vec::new())])
     };
     let Some(stop) = util::parse(stop) else {
         return Err(RedisError::not_integer());
@@ -86,36 +87,36 @@ pub fn cmd_lrange(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError>
     };
 
     let Some((start, stop)) = resolve_range(list.len(), start, stop) else {
-        return Ok(Frame::Array(Vec::new()))
+        return Ok(vec![Frame::Array(Vec::new())])
     };
     let bulk_str_list: Vec<Frame> = list
         .range(start as usize..=stop as usize)
         .map(|val| Frame::BulkString(val.to_vec()))
         .collect();
-    Ok(Frame::Array(bulk_str_list))
+    Ok(vec![Frame::Array(bulk_str_list)])
 }
 
 /// Spec: LLEN key returns the list length as a RESP integer. Missing list → :0\r\n.
-pub fn cmd_llen(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_llen(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() != 2 {
         return Err(RedisError::wrong_args("llen"))
     }
     let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("llen"))?;
     let Some(entry) = store.live_entry(key) else {
-        return Ok(Frame::Int(0))
+        return Ok(vec![Frame::Int(0)])
     };
 
     match &entry.value {
-        Value::List(list) => Ok(Frame::Int(list.len() as i64)),
+        Value::List(list) => Ok(vec![Frame::Int(list.len() as i64)]),
         _ => Err(RedisError::wrong_type()),
     }
 }
 
-/// Spec: LPOP key removes and returns the first element as aFrame::as_bulk string.
+/// Spec: LPOP key removes and returns the first element as a bulk string.
 /// Missing/empty list → $-1\r\n.
 /// Spec: LPOP key 2 removes and returns the first N elements as a RESP array.
 /// If N > length, remove all and return them.
-pub fn cmd_lpop(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
+pub fn cmd_lpop(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() < 2 || args.len() > 3 {
         return Err(RedisError::wrong_args("lpop"))
     }
@@ -135,14 +136,14 @@ pub fn cmd_lpop(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
         None => None,
     };
     let Some(entry) = store.live_entry(key) else {
-        return Ok(count.map_or(Frame::Null, |_| Frame::NullArray))
+        return Ok(vec![count.map_or(Frame::Null, |_| Frame::NullArray)])
     };
 
     match &mut entry.value {
         Value::List(list) => match count {
             None => match list.pop_front() {
-                Some(v) => Ok(Frame::bulk(v)),
-                None => Ok(Frame::Null),
+                Some(v) => Ok(vec![Frame::bulk(v)]),
+                None => Ok(vec![Frame::Null]),
             },
             Some(n) => {
                 let n = n.min(list.len() as i64);
@@ -150,7 +151,7 @@ pub fn cmd_lpop(args: &[Frame], store: &mut Store) -> Result<Frame,RedisError> {
                     .filter_map(|_| list.pop_front())
                     .map(Frame::bulk)
                     .collect();
-                Ok(Frame::Array(removed))
+                Ok(vec![Frame::Array(removed)])
             }
         },
         _ => Err(RedisError::wrong_type()),

@@ -1,5 +1,6 @@
 mod resp;
 mod db;
+mod client;
 mod connection;
 mod util;
 mod commands;
