@@ -2755,3 +2755,47 @@ fn xread_block_dollar_timeout_returns_null() {
         .cmd(&[b"XREAD", b"BLOCK", b"200", b"STREAMS", b"s", b"$"])
         .expect(b"*-1\r\n");
 }
+
+#[test]
+fn incr_increments_existing_integer() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"foo", b"41"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b":42\r\n");
+    t.client.cmd(&[b"INCR", b"foo"]).expect(b":43\r\n");
+}
+
+/// A missing key is treated as 0, so the first INCR yields 1 (and the key is
+/// created as a string holding "1").
+#[test]
+fn incr_missing_key_starts_at_one() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"INCR", b"counter"]).expect(b":1\r\n");
+    t.client.cmd(&[b"INCR", b"counter"]).expect(b":2\r\n");
+    t.client.cmd(&[b"GET", b"counter"]).expect(b"$1\r\n2\r\n");
+}
+
+/// A value that is not an integer is rejected, and the connection survives.
+#[test]
+fn incr_non_integer_value_returns_error() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"s", b"abc"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"INCR", b"s"])
+        .expect(b"-ERR value is not an integer or out of range\r\n");
+    t.client.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+}
+
+/// INCR must keep the key's TTL: if it dropped `expires_at`, the key would
+/// survive past its PX and still hold "6".
+#[test]
+fn incr_preserves_ttl() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"5", b"PX", b"100"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"INCR", b"k"]).expect(b":6\r\n");
+
+    sleep(Duration::from_millis(200));
+
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}

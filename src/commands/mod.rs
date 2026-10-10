@@ -23,6 +23,7 @@ pub use connection::cmd_type;
 
 pub use string::cmd_get;
 pub use string::cmd_set;
+pub use string::cmd_incr;
 
 pub use list::blpop;
 pub use list::cmd_llen;

@@ -1,8 +1,8 @@
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_echo, cmd_get, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_ping, cmd_publish,
-    cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_xadd, cmd_xrange, cmd_xread,
-    cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
+    CmdResult, cmd_echo, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_ping,
+    cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_xadd,
+    cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::Store;
 use crate::error::RedisError;
@@ -21,6 +21,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"ECHO" => Some(cmd_echo),
         b"GET" => Some(cmd_get),
         b"SET" => Some(cmd_set),
+        b"INCR" => Some(cmd_incr),
         b"RPUSH" => Some(cmd_rpush),
         b"LPUSH" => Some(cmd_lpush),
         b"LRANGE" => Some(cmd_lrange),

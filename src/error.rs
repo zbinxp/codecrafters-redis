@@ -75,4 +75,7 @@ impl RedisError {
         RedisError { message: format!("ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context") }
     }
 
+    pub(crate) fn increment_overflow() -> Self {
+        RedisError { message: "ERR increment or decrement would overflow".into() }
+    }
 }

@@ -28,6 +28,25 @@ pub fn cmd_set(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult
     Ok(vec![Frame::SimpleString(b"OK".to_vec())])
 }
 
+pub fn cmd_incr(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() > 2 {
+        return Err(RedisError::wrong_args("incr"))
+    }
+    let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("incr"))?;
+    let Some(entry) = store.live_entry(key) else {
+        store.data.insert(key.to_vec(), Entry::new(Value::String(b"1".to_vec())));
+        return Ok(vec![Frame::Int(1)])
+    };
+    let Value::String(v) = &mut entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    let cur:i64 = util::parse(v).ok_or_else(RedisError::not_integer)?;
+    let res = cur.checked_add(1).ok_or_else(RedisError::increment_overflow)?;
+    // update entry.value
+    *v = res.to_string().into_bytes();
+    Ok(vec![Frame::Int(res)])
+}
+
 // SET <key> <value> [PX <milliseconds>]
 fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), RedisError> {
     if args.len() > 5 {
