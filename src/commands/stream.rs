@@ -80,7 +80,8 @@ pub fn cmd_xadd(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
         return Err(RedisError::wrong_type())
     };
     stream.insert(id, fields);
-
+    store.touch(key);
+    
     // notify xread that new value added
     if let Some(q) = store.waiters.get_mut(key) {
         while let Some(tx) = q.pop_front() {

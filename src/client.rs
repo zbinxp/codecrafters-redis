@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{db::Outbox, resp::Frame};
 
@@ -17,6 +17,8 @@ pub struct Conn {
     pub out_tx: Outbox,
     // None = no transaction
     pub multi: Option<Vec<Frame>>,
+    // save keys in watch mode
+    pub watched: HashMap<Vec<u8>, u64>,
 }
 
 impl Conn {
@@ -26,6 +28,7 @@ impl Conn {
             subscriptions: HashSet::new(),
             out_tx,
             multi : None,
+            watched: HashMap::new()
         }
     }
 }

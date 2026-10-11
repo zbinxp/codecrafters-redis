@@ -86,4 +86,8 @@ impl RedisError {
     pub(crate) fn discard_without_multi() -> Self {
        RedisError { message: "ERR DISCARD without MULTI".into() }
     }
+
+    pub(crate) fn watch_inside_multi() -> Self {
+       RedisError { message: "ERR WATCH inside MULTI is not allowed".into() }
+   }
 }

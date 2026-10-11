@@ -2934,3 +2934,103 @@ fn concurrent_transactions_have_separate_queues() {
     t.client.cmd(&[b"GET", b"foo"]).expect(b"$2\r\n43\r\n");
 }
 
+#[test]
+fn watch_returns_ok() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"WATCH", b"key"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"k1", b"k2"]).expect(b"+OK\r\n"); 
+}
+
+#[test]
+fn watch_inside_multi_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"WATCH", b"counter"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"WATCH", b"another_key"])
+        .expect(b"-ERR WATCH inside MULTI is not allowed\r\n");
+}
+
+#[test]
+fn exec_aborts_when_watched_key_changed() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"foo"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"300"]).expect(b"+QUEUED\r\n");
+    other.cmd(&[b"SET", b"foo", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*-1\r\n");
+    t.client.cmd(&[b"GET", b"bar"]).expect(b"$3\r\n200\r\n");   // 队列没执行，原值保留
+}
+
+#[test]
+fn exec_succeeds_when_unwatched_key_changes() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"SET", b"baz", b"100"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"caz", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"baz"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"caz", b"400"]).expect(b"+QUEUED\r\n");
+    other.cmd(&[b"SET", b"caz", b"300"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*1\r\n+OK\r\n");
+    t.client.cmd(&[b"GET", b"caz"]).expect(b"$3\r\n400\r\n");
+}
+
+#[test]
+fn exec_aborts_even_if_watched_key_is_restored() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"foo"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"300"]).expect(b"+QUEUED\r\n");
+    other.cmd(&[b"SET", b"foo", b"999"]).expect(b"+OK\r\n");
+    other.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");   // 改回原值
+    t.client.cmd(&[b"EXEC"]).expect(b"*-1\r\n");               // 仍要 abort
+}
+
+/// fp0: watching several keys aborts if *any* one of them was modified.
+#[test]
+fn exec_aborts_when_one_of_several_watched_keys_changes() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"foo", b"bar"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"300"]).expect(b"+QUEUED\r\n");
+    other.cmd(&[b"SET", b"foo", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*-1\r\n");
+    t.client.cmd(&[b"GET", b"bar"]).expect(b"$3\r\n200\r\n");
+}
+
+/// uo9: a key that did not exist at WATCH time still counts as modified when
+/// another client creates it before EXEC.
+#[test]
+fn exec_aborts_when_watched_missing_key_is_created() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"WATCH", b"foo"]).expect(b"+OK\r\n");
+    other.cmd(&[b"SET", b"foo", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"300"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*-1\r\n");
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$3\r\n200\r\n");
+}
+
+#[test]
+fn unwatch_clears_watched_keys() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"WATCH", b"foo"]).expect(b"+OK\r\n");
+    other.cmd(&[b"SET", b"foo", b"200"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"UNWATCH"]).expect(b"+OK\r\n");           // 清掉 watch
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"foo", b"400"]).expect(b"+QUEUED\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*1\r\n+OK\r\n");         // 不再 abort
+    t.client.cmd(&[b"GET", b"foo"]).expect(b"$3\r\n400\r\n");
+}

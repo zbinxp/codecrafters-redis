@@ -36,6 +36,8 @@ pub(crate) struct Db {
     pub data: HashMap<Vec<u8>, Entry>,
     pub waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
     pub channel_subscribers: HashMap<Vec<u8>, HashMap<u64, Outbox>>,
+    versions: HashMap<Vec<u8>, u64>,
+    version_seq: u64,
 }
 
 impl Db {
@@ -44,6 +46,8 @@ impl Db {
             data: HashMap::new(),
             waiters: HashMap::new(),
             channel_subscribers: HashMap::new(),
+            versions: HashMap::new(),
+            version_seq: 0,
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {
@@ -54,8 +58,19 @@ impl Db {
             .is_some_and(|t| t <= Instant::now())
         {
             self.data.remove(key);
+            self.touch(key);
         }
         self.data.get_mut(key)
+    }
+
+    /// mark that this operation causes version bump
+    pub fn touch(&mut self, key: &[u8]) {
+        self.version_seq += 1;
+        self.versions.insert(key.to_vec(), self.version_seq);
+    }
+
+    pub fn version(&self, key:&[u8]) -> u64 {
+        self.versions.get(key).copied().unwrap_or(0)
     }
 }
 

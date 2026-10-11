@@ -39,7 +39,7 @@ pub fn cmd_zadd(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
     // check existance
     let existed = tree.extract_if(.., |(_, m)| m == member).next().is_some();
     tree.insert((Score(val), member.to_vec()));
-    // todo: use a HM to store (member, score)
+    store.touch(key);
     Ok(vec![Frame::Int(!existed as i64)])
 }
 
@@ -151,5 +151,8 @@ pub fn cmd_zrem(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
         return Err(RedisError::wrong_type())
     };
     let existed = tree.extract_if(.., |(_, m)| m == member).next().is_some();
+    if existed {
+        store.touch(key);
+    }
     Ok(vec![Frame::Int(existed as i64)])
 }

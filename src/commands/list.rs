@@ -49,7 +49,7 @@ fn push_impl(
     for elem in &args[2..] {
         let val = elem.as_bulk().ok_or_else(||RedisError::wrong_args(fn_name))?;
         push(list, val.to_vec());
-
+        
         // still hold the lock, notify the waiters
         if let Some(q) = store.waiters.get_mut(key) {
             while !q.is_empty() {
@@ -60,7 +60,9 @@ fn push_impl(
             }
         }
     }
-    Ok(vec![Frame::Int(list.len() as i64)])
+    let count = list.len();
+    store.touch(key);
+    Ok(vec![Frame::Int(count as i64)])
 }
 
 /// Spec: LRANGE key start stop returns a RESP array of the list elements from start to stop,
@@ -142,7 +144,10 @@ pub fn cmd_lpop(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
     match &mut entry.value {
         Value::List(list) => match count {
             None => match list.pop_front() {
-                Some(v) => Ok(vec![Frame::bulk(v)]),
+                Some(v) => {
+                    store.touch(key);
+                    Ok(vec![Frame::bulk(v)])
+                },
                 None => Ok(vec![Frame::Null]),
             },
             Some(n) => {
@@ -151,6 +156,9 @@ pub fn cmd_lpop(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
                     .filter_map(|_| list.pop_front())
                     .map(Frame::bulk)
                     .collect();
+                if !removed.is_empty() {
+                    store.touch(key);
+                }
                 Ok(vec![Frame::Array(removed)])
             }
         },
@@ -185,6 +193,7 @@ pub async fn blpop(args: &[Frame], store: Arc<Mutex<Store>>) -> Result<Frame, Re
                     return Err(RedisError::wrong_type())
                 };
                 if let Some(v) = list.pop_front() {
+                    db.touch(key);
                     return Ok(Frame::Array(vec![Frame::bulk(key), Frame::bulk(v)]))
                 }
             }

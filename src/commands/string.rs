@@ -25,6 +25,7 @@ pub fn cmd_set(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult
     let (key, value, expires_at) = parse_set(args)?;
     let value = Value::String(value.to_vec());
     store.data.insert(key.to_vec(), Entry { value, expires_at });
+    store.touch(key);
     Ok(vec![Frame::SimpleString(b"OK".to_vec())])
 }
 
@@ -44,6 +45,7 @@ pub fn cmd_incr(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
     let res = cur.checked_add(1).ok_or_else(RedisError::increment_overflow)?;
     // update entry.value
     *v = res.to_string().into_bytes();
+    store.touch(key);
     Ok(vec![Frame::Int(res)])
 }
 
