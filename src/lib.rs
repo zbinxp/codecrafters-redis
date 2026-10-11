@@ -19,8 +19,8 @@ use resp::{Frame};
 use db::{Store};
 use connection::StreamHandler;
 
-pub async fn run() {
-    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+pub async fn run(port: u16) {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     let store = Arc::new(Mutex::new(Store::new()));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
