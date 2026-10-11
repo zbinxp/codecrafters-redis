@@ -3034,3 +3034,15 @@ fn unwatch_clears_watched_keys() {
     t.client.cmd(&[b"EXEC"]).expect(b"*1\r\n+OK\r\n");         // 不再 abort
     t.client.cmd(&[b"GET", b"foo"]).expect(b"$3\r\n400\r\n");
 }
+
+#[test]
+fn info_replication_reports_master_role() {
+    let mut t = TestCtx::new();
+    let c = t.client
+        .cmd(&[b"INFO", b"replication"]);
+    c.read_line(); //skip $n\r\n
+    assert_eq!(c.read_line(), b"# Replication");
+    assert_eq!(c.read_line(), b"role:master");
+    assert!(c.read_line().starts_with(b"master_replid:"));
+    assert_eq!(c.read_line(), b"master_repl_offset:0");
+}

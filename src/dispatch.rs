@@ -1,9 +1,9 @@
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_llen, cmd_lpop, cmd_lpush,
-    cmd_lrange, cmd_multi, cmd_ping, cmd_publish, cmd_rpush, cmd_set, cmd_subscribe, cmd_type,
-    cmd_unsubscribe, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange,
-    cmd_zrank, cmd_zrem, cmd_zscore, cmd_unwatch
+    CmdResult, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_llen, cmd_lpop,
+    cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_publish, cmd_rpush, cmd_set, cmd_subscribe,
+    cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd,
+    cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::Store;
 use crate::error::RedisError;
@@ -45,6 +45,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"DISCARD" => Some(cmd_discard),
         b"WATCH" => Some(cmd_watch),
         b"UNWATCH" => Some(cmd_unwatch),
+        b"INFO" => Some(cmd_info),
         _ => None,
     }
 }

@@ -16,12 +16,16 @@ use tokio::{
 };
 
 use resp::{Frame};
-use db::{Store};
+use db::{Store, Role};
 use connection::StreamHandler;
 
-pub async fn run(port: u16) {
+pub async fn run(port: u16, replicaof: Option<(String, u16)>) {
+    let role = match replicaof {
+        Some((host, port)) => Role::Replica { host, port },
+        None => Role::Master
+    };
     let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
-    let store = Arc::new(Mutex::new(Store::new()));
+    let store = Arc::new(Mutex::new(Store::new(role)));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;

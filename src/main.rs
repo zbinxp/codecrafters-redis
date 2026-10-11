@@ -1,17 +1,36 @@
 #[tokio::main]
 async fn main() {
-    codecrafters_redis::run(parse_port(std::env::args())).await
+    let cfg = parse_args(std::env::args());
+    codecrafters_redis::run(cfg.port, cfg.replicaof).await
 }
 
-fn parse_port(mut args: impl Iterator<Item = String>) -> u16 {
+fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
+    let mut cfg = Config {port: 6379, replicaof: None};
     while let Some(a) = args.next() {
-        if a == "--port" {
-            if let Some(p) = args.next().and_then(|v|v.parse().ok()) {
-                return p
-            }
+        match a.as_str() {
+            "--port" => {
+                cfg.port = args.next().and_then(|v|v.parse().ok()).unwrap_or(6379);
+            },
+            "--replicaof" => {
+                if let Some(v) = args.next() {
+                    if let Some((h,p)) = v.split_once(" ") {
+                        cfg.replicaof = Some((h.to_string(), p.trim().parse().unwrap_or(0)));
+                    }else if let Some(p) = args.next() {
+                        cfg.replicaof = Some((v.to_string(), p.trim().parse().unwrap_or(0)));
+                    }
+                }
+            },
+            _ => {}
         }
     }
-    6379
+
+    cfg
+}
+
+
+struct Config {
+    port: u16,
+    replicaof: Option<(String, u16)>,
 }
 
 #[cfg(test)]
@@ -20,12 +39,29 @@ mod tests {
 
     #[test]
     fn defaults_to_6379() {
-        assert_eq!(parse_port(std::iter::empty()), 6379);
+        let cfg = parse_args(std::iter::empty());
+        assert_eq!(cfg.port, 6379);
+        assert_eq!(cfg.replicaof, None);
     }
 
     #[test]
     fn parses_port_flag() {
         let args = vec!["--port".to_string(), "6380".to_string()];
-        assert_eq!(parse_port(args.into_iter()), 6380);
+        let cfg = parse_args(args.into_iter());
+        assert_eq!(cfg.port, 6380);
+    }
+
+    #[test]
+    fn parse_replicaof_one_argument() {
+        let args = vec!["--replicaof".into(), "localhost 7788".into()];
+        let cfg = parse_args(args.into_iter());
+        assert_eq!(cfg.replicaof, Some(("localhost".into(), 7788)))
+    }
+
+    #[test]
+    fn parse_replicaof_two_arguments() {
+        let args = vec!["--replicaof".into(), "localhost".into(),"7788".into()];
+        let cfg = parse_args(args.into_iter());
+        assert_eq!(cfg.replicaof, Some(("localhost".into(), 7788)))
     }
 }

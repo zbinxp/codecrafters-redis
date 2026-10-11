@@ -32,22 +32,33 @@ pub enum Value {
     Stream(BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>),
 }
 
+pub enum Role {
+    Master,
+    Replica { host: String, port: u16 }
+}
+
 pub(crate) struct Db {
     pub data: HashMap<Vec<u8>, Entry>,
     pub waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
     pub channel_subscribers: HashMap<Vec<u8>, HashMap<u64, Outbox>>,
+    pub role: Role,
+    pub master_replid: String,
+    pub master_repl_offset: u64,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
 
 impl Db {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(role: Role) -> Self {
         Self {
             data: HashMap::new(),
             waiters: HashMap::new(),
             channel_subscribers: HashMap::new(),
             versions: HashMap::new(),
             version_seq: 0,
+            role,
+            master_replid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".into(),
+            master_repl_offset: 0,
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {

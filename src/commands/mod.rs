@@ -5,6 +5,7 @@ mod stream;
 mod string;
 mod zset;
 mod transaction;
+mod server;
 
 use std::cmp::min;
 
@@ -55,6 +56,8 @@ pub use transaction::cmd_exec;
 pub use transaction::cmd_discard;
 pub use transaction::cmd_watch;
 pub use transaction::cmd_unwatch;
+
+pub use server::cmd_info;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)
