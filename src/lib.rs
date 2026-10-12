@@ -6,6 +6,7 @@ mod util;
 mod commands;
 mod error;
 mod dispatch;
+mod replica;
 
 use std::sync::{Arc, Mutex};
 
@@ -20,10 +21,15 @@ use db::{Store, Role};
 use connection::StreamHandler;
 
 pub async fn run(port: u16, replicaof: Option<(String, u16)>) {
-    let role = match replicaof {
-        Some((host, port)) => Role::Replica { host, port },
+    let role = match &replicaof {
+        Some((h, p)) => Role::Replica { host: h.clone(), port:*p },
         None => Role::Master
     };
+    // if we're replica, connect to master with PING
+    if let Some((host, master_port)) = replicaof {
+        tokio::spawn(replica::handshake(host, master_port, port));
+    }
+
     let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     let store = Arc::new(Mutex::new(Store::new(role)));
     loop {

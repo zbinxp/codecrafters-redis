@@ -39,18 +39,27 @@ struct Server(Child);
 
 impl Server {
     fn start() -> Self {
-        let addr = ADDR.parse().unwrap();
+        Server::start_on(ADDR, &[])
+    }
+
+    /// Start the server on `addr` (its port is passed via `--port`), with any
+    /// `extra_args` such as `--replicaof`. Waits until it accepts connections.
+    fn start_on(addr: &str, extra_args: &[&str]) -> Self {
+        let sock: std::net::SocketAddr = addr.parse().unwrap();
         // The tests serialise themselves with `lock_server()`, but a stale
         // server (e.g. one left over from `./your_program.sh`) can still be
         // holding the port. If it is, the child we spawn below dies with
         // `AddrInUse` while `TcpStream::connect` keeps succeeding -- so the
         // test would silently talk to the stale binary instead of the one we
         // just built. Refuse to run in that case.
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
-            panic!("{ADDR} is already in use -- kill the stale server before running tests");
+        if TcpStream::connect_timeout(&sock, Duration::from_millis(150)).is_ok() {
+            panic!("{addr} is already in use -- kill the stale server before running tests");
         }
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"));
+        cmd.arg("--port").arg(sock.port().to_string());
+        cmd.args(extra_args);
+        let mut child = cmd
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -61,14 +70,14 @@ impl Server {
             // If the child already exited it will never listen; report why now
             // rather than waiting out the whole timeout.
             if let Some(status) = child.try_wait().expect("failed to poll the server process") {
-                panic!("server exited before listening on {ADDR}: {status}");
+                panic!("server exited before listening on {addr}: {status}");
             }
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            if TcpStream::connect_timeout(&sock, Duration::from_millis(100)).is_ok() {
                 return Server(child);
             }
             sleep(Duration::from_millis(20));
         }
-        panic!("server never started listening on {ADDR}");
+        panic!("server never started listening on {addr}");
     }
 }
 
@@ -120,8 +129,13 @@ struct Client {
 
 impl Client {
     fn connect() -> Self {
+        Client::connect_to(ADDR)
+    }
+
+    /// Connect to an arbitrary `host:port` (used by the replication tests).
+    fn connect_to(addr: &str) -> Self {
         Client {
-            stream: TcpStream::connect(ADDR).expect("failed to connect"),
+            stream: TcpStream::connect(addr).expect("failed to connect"),
             buf: Vec::new(),
         }
     }
@@ -3045,4 +3059,94 @@ fn info_replication_reports_master_role() {
     assert_eq!(c.read_line(), b"role:master");
     assert!(c.read_line().starts_with(b"master_replid:"));
     assert_eq!(c.read_line(), b"master_repl_offset:0");
+}
+
+// ---------------------------------------------------------------------------
+// Replication handshake
+// ---------------------------------------------------------------------------
+
+/// gl7: a server started with `--replicaof` connects to the master and sends
+/// `PING` as a RESP array. We act as the master ourselves (an ephemeral
+/// listener) and inspect the first bytes the replica sends.
+#[test]
+fn replica_sends_handshake() {
+    let _guard = lock_server();
+
+    // Act as the master on an ephemeral port. Non-blocking so a missing
+    // replica fails the test instead of hanging in `accept`.
+    let master = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
+    let master_addr = master.local_addr().unwrap();
+    master.set_nonblocking(true).unwrap();
+
+    // Give the replica its own free port.
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+
+    let replicaof = format!("{} {}", master_addr.ip(), master_addr.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    // Wait for the replica to dial in.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut sock, _) = loop {
+        match master.accept() {
+            Ok(pair) => break pair,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    panic!("replica never connected to the master");
+                }
+                sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        }
+    };
+    sock.set_nonblocking(false).unwrap();
+    sock.set_read_timeout(Some(TIMEOUT)).unwrap();
+
+    // The first thing a replica must send is the handshake PING.
+    let mut got = Vec::new();
+    let mut chunk = [0u8; 64];
+    while got.len() < PING.len() {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+            Err(e) => panic!("reading from replica failed: {e}"),
+        }
+    }
+    assert_eq!(
+        &got, PING,
+        "expected the replica's first bytes to be PING, got {:?}",
+        String::from_utf8_lossy(&got)
+    );
+
+    let replica_port_str = &replica_addr[replica_addr.find(':').map(|x|x+1).unwrap_or(0)..];
+    if sock.write_all(b"+PONG\r\n").is_err() {
+        panic!("writing to replica failed");
+    }
+    let expect = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n",
+                        replica_port_str.len(), replica_port_str);
+    got.clear();
+    while got.len() < expect.len() {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+            Err(e) => panic!("reading from replica failed: {e}"),
+        }
+    }                    
+    assert_eq!(&got, expect.as_bytes());
+    if sock.write_all(b"+OK\r\n").is_err() {
+        panic!("writing to replica failed");
+    }
+    let expect = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".to_string();
+    got.clear();
+    while got.len() < expect.len() {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+            Err(e) => panic!("reading from replica failed: {e}"),
+        }
+    }
+    assert_eq!(&got, expect.as_bytes());
 }
