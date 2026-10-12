@@ -23,3 +23,12 @@ pub fn cmd_info(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
 
     Ok(vec![Frame::bulk(out)])
 }
+
+pub fn cmd_replconf(_args: &[Frame], _conn: &mut Conn, _store: &mut Store) -> CmdResult {
+    Ok(vec![Frame::simple("OK")])
+}
+
+pub fn cmd_psync(_args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    let reply = format!("FULLRESYNC {} {}", store.master_replid, store.master_repl_offset);
+    Ok(vec![Frame::simple(reply)])
+}

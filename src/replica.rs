@@ -9,22 +9,11 @@ pub async fn handshake(host: String, port: u16, own_port: u16) -> Option<()> {
         eprintln!("replica: cannot connect to master {addr}");
         return None;
     };
-    let mut buf = BytesMut::new();
-    Frame::array(vec!["PING"]).encode(&mut buf);
-    stream.write_all(&buf).await.ok()?;
-    read_line(&mut stream).await?; //+PONG
 
-    buf.clear();
-    Frame::array(vec![
-        "REPLCONF", "listening-port", &own_port.to_string()
-    ]).encode(&mut buf);
-    stream.write_all(&buf).await.ok()?;
-    read_line(&mut stream).await?; //+OK
-
-    buf.clear();
-    Frame::array(vec!["REPLCONF", "capa", "psync2"]).encode(&mut buf);
-    stream.write_all(&buf).await.ok()?;
-    read_line(&mut stream).await?;
+    send_and_read_reply(&mut stream, Frame::array(vec!["PING"])).await?;
+    send_and_read_reply(&mut stream, Frame::array(vec!["REPLCONF", "listening-port", &own_port.to_string()])).await?;
+    send_and_read_reply(&mut stream, Frame::array(vec!["REPLCONF", "capa", "psync2"])).await?;
+    send_and_read_reply(&mut stream, Frame::array(vec!["PSYNC", "?", "-1"])).await?;
 
     // keep connection alive
     let mut chunk = [0u8; 1024];
@@ -52,4 +41,11 @@ async fn read_line(stream: &mut TcpStream) -> Option<Vec<u8>> {
             }
         }
     }
+}
+
+async fn send_and_read_reply(stream: &mut TcpStream, frame: Frame) -> Option<Vec<u8>> {
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    stream.write_all(&buf).await.ok()?;
+    read_line(stream).await
 }

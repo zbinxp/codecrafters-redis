@@ -3069,7 +3069,7 @@ fn info_replication_reports_master_role() {
 /// `PING` as a RESP array. We act as the master ourselves (an ephemeral
 /// listener) and inspect the first bytes the replica sends.
 #[test]
-fn replica_sends_handshake() {
+fn replica_sends_full_handshake() {
     let _guard = lock_server();
 
     // Act as the master on an ephemeral port. Non-blocking so a missing
@@ -3127,20 +3127,24 @@ fn replica_sends_handshake() {
     }
     let expect = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n",
                         replica_port_str.len(), replica_port_str);
-    got.clear();
-    while got.len() < expect.len() {
-        match sock.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&chunk[..n]),
-            Err(e) => panic!("reading from replica failed: {e}"),
-        }
-    }                    
-    assert_eq!(&got, expect.as_bytes());
+    assert_master_should_reply(&mut sock, expect);
     if sock.write_all(b"+OK\r\n").is_err() {
         panic!("writing to replica failed");
     }
     let expect = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".to_string();
-    got.clear();
+    assert_master_should_reply(&mut sock, expect);
+    if sock.write_all(b"+OK\r\n").is_err() {
+        panic!("writing to replica failed");
+    }
+    let expect_psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".to_string();
+    assert_master_should_reply(&mut sock, expect_psync);
+    // 主库回 +FULLRESYNC <REPL_ID> 0\r\n
+
+}
+
+fn assert_master_should_reply(sock:&mut TcpStream, expect: String) {
+    let mut got = Vec::new();
+    let mut chunk = [0u8; 64];
     while got.len() < expect.len() {
         match sock.read(&mut chunk) {
             Ok(0) => break,
@@ -3149,4 +3153,24 @@ fn replica_sends_handshake() {
         }
     }
     assert_eq!(&got, expect.as_bytes());
+}
+
+
+#[test]
+fn replconf_returns_ok() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+        .expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"REPLCONF", b"capa", b"psync2"])
+        .expect(b"+OK\r\n");
+}
+
+#[test]
+fn psync_returns_fullresync() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"PSYNC", b"?", b"-1"])
+        .expect(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n");
 }
