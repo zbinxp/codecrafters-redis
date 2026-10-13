@@ -36,7 +36,7 @@ pub async fn handshake(host: String, port: u16, own_port: u16, store: Arc<Mutex<
             Ok(n) => {
                 decoder.extend(&chunk[..n]);
                 while let Some(frame) = decoder.parse() {
-                    let len = frame_len(&frame);
+                    let len = &frame.frame_len();
                     if is_getack(&frame) {
                         let mut buf = BytesMut::new();
                         Frame::array(vec!["REPLCONF","ACK", &offset.to_string()]).encode(&mut buf);
@@ -87,8 +87,3 @@ fn is_getack(frame: &Frame) -> bool {
     && args[1].as_bulk().is_some_and(|b|b.eq_ignore_ascii_case(b"getack"))
 }
 
-fn frame_len(frame: &Frame) -> usize {
-    let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
-    buf.len()
-}

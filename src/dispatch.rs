@@ -4,7 +4,6 @@ use crate::commands::{
     cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush,
     cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd,
     cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
-    cmd_wait,
 };
 use crate::db::{Store, Role};
 use crate::error::RedisError;
@@ -49,7 +48,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"INFO" => Some(cmd_info),
         b"REPLCONF" => Some(cmd_replconf),
         b"PSYNC" => Some(cmd_psync),
-        b"WAIT" => Some(cmd_wait),
+        // b"WAIT" => Some(cmd_wait),
         _ => None,
     }
 }
@@ -115,8 +114,10 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
             let result = handler(args, conn, store)?;
             // send request to replicas
             if is_write_command(name) {
+                let cmd = Frame::Array(args.to_vec());
+                store.master_repl_offset += cmd.frame_len() as u64;
                 for out in store.replicas.values() {
-                    let _ = out.send(Frame::Array(args.to_vec()));
+                    let _ = out.send(cmd.clone());
                 }
             }
             Ok(result)

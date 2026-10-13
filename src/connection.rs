@@ -1,5 +1,5 @@
 use crate::client::Conn;
-use crate::commands::{blpop, collect_xread, resolve_ids};
+use crate::commands::{blpop, cmd_wait, collect_xread, resolve_ids};
 use crate::dispatch::execute;
 use crate::resp::{Decoder, Frame};
 use crate::util;
@@ -96,6 +96,9 @@ where
                     }
                     if cmd == b"XREAD" && args.get(1).and_then(Frame::as_bulk) == Some(b"BLOCK") {
                         return Ok(vec![self.xread_block(args).await?]);
+                    }
+                    if cmd == b"WAIT" {
+                        return Ok(vec![cmd_wait(args, self.store.clone()).await?]);
                     }
                 }
             }

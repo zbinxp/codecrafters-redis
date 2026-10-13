@@ -82,6 +82,12 @@ impl Frame {
         }
     }
 
+    pub fn frame_len(&self) -> usize {
+        let mut buf = BytesMut::new();
+        self.encode(&mut buf);
+        buf.len()
+    }
+
     /// Convenience constructor: build a simple string from any byte-like source.
     pub fn simple(data: impl AsRef<[u8]>) -> Self {
         Self::SimpleString(data.as_ref().to_vec())
@@ -90,6 +96,7 @@ impl Frame {
     pub fn array(data: Vec<impl AsRef<[u8]>>) -> Self {
         Self::Array(data.into_iter().map(|d| Frame::bulk(d)).collect())
     }
+
 }
 
 

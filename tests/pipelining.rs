@@ -3396,3 +3396,47 @@ fn wait_returns_connected_replica_count() {
     t.client.cmd(&[b"WAIT", b"2", b"500"]).expect(b":2\r\n");
     t.client.cmd(&[b"WAIT", b"3", b"500"]).expect(b":2\r\n");
 }
+
+
+#[test]
+fn wait_returns_acked_replica_count() {
+    let _guard = lock_server();
+    let maddr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let _master = Server::start_on(&maddr.to_string(), &[]);
+    let r1 = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let _r1 = Server::start_on(&r1, 
+        &["--replicaof", &format!("{} {}", maddr.ip(), maddr.port())]);
+    let r2 = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let _r2 = Server::start_on(&r2, 
+        &["--replicaof", &format!("{} {}", maddr.ip(), maddr.port())]);
+
+    
+    let mut c = Client::connect_to(&maddr.to_string());
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let output = c.cmd(&[b"WAIT", b"0", b"500"]).read_line();
+        if output == b":2" {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("replicas not ready");
+        }
+        sleep(Duration::from_millis(10));
+    }
+
+    c.cmd(&[b"SET", b"foo", b"123"]).expect(b"+OK\r\n");
+    c.cmd(&[b"WAIT", b"2", b"500"]).expect(b":2\r\n");
+    c.cmd(&[b"SET", b"bar", b"456"]).expect(b"+OK\r\n");
+    c.cmd(&[b"WAIT", b"2", b"500"]).expect(b":2\r\n");
+}
