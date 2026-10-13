@@ -104,7 +104,16 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
     }
 
     match lookup(name) {
-        Some(handler) => handler(args, conn, store),
+        Some(handler) => {
+            let result = handler(args, conn, store)?;
+            // send request to replicas
+            if is_write_command(name) {
+                for out in store.replicas.values() {
+                    let _ = out.send(Frame::Array(args.to_vec()));
+                }
+            }
+            Ok(result)
+        },
         None => Err(RedisError::unknown_command(&String::from_utf8_lossy(name))),
     }
 }
@@ -119,4 +128,10 @@ fn is_transaction_control(name: &[u8]) -> bool {
     ]
     .iter()
     .any(|c| name.eq_ignore_ascii_case(c))
+}
+
+fn is_write_command(name: &[u8]) -> bool {
+    [b"SET".as_slice(), b"INCR", b"RPUSH", b"LPUSH", b"LPOP",
+    b"ZADD", b"ZREM", b"XADD"]
+        .iter().any(|c| name.eq_ignore_ascii_case(c))
 }

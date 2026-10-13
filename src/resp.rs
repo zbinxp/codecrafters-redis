@@ -16,6 +16,7 @@ pub enum Frame {
     Err(String),           // -ERR msg\r\n
     Null,
     NullArray,
+    Rdb(Vec<u8>),
 }
 
 impl Frame {
@@ -58,6 +59,12 @@ impl Frame {
             },
             Self::NullArray => {
                 out.extend_from_slice(b"*-1\r\n");
+            },
+            Self::Rdb(val) => {
+                out.put_u8(b'$');
+                out.extend_from_slice(val.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(val);
             }
         }
     }

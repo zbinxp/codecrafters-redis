@@ -3167,10 +3167,66 @@ fn replconf_returns_ok() {
         .expect(b"+OK\r\n");
 }
 
+pub const EMPTY_RDB: &[u8] =
+ b"REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\x08\xbce\xfa\x08used-mem\xc2\xb0\xc4\x10\x00\xfa\x08aof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
+
 #[test]
 fn psync_returns_fullresync() {
     let mut t = TestCtx::new();
+    let mut out = BytesMut::new();
+    out.put_u8(b'$');
+    out.extend_from_slice(EMPTY_RDB.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(EMPTY_RDB);
     t.client
         .cmd(&[b"PSYNC", b"?", b"-1"])
-        .expect(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n");
+        .expect(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        .expect(&out);
+}
+
+#[test]
+fn master_propagates_writes_to_replica() {
+    let mut t = TestCtx::new();
+    let mut repl = t.connect();                 // 扮演副本的连接
+
+    repl.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+    repl.cmd(&[b"REPLCONF", b"listening-port", b"6380"]).expect(b"+OK\r\n");
+    repl.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+    repl.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+    assert_eq!(repl.read_line(), b"$88");
+    repl.expect(EMPTY_RDB);                       // 吃掉 88 字节 RDB
+
+    // 普通客户端发写命令
+    t.client.cmd(&[b"SET", b"foo", b"1"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"2"]).expect(b"+OK\r\n");
+
+    // 副本连接应收到同样顺序的写命令
+    repl.expect(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n");
+    repl.expect(b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n");
+}
+
+/// hd5: every connected replica receives the propagated writes in order.
+#[test]
+fn master_propagates_writes_to_multiple_replicas() {
+    let mut t = TestCtx::new();
+    let mut r1 = t.connect();
+    let mut r2 = t.connect();
+
+    for r in [&mut r1, &mut r2] {
+        r.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+        r.cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+            .expect(b"+OK\r\n");
+        r.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+        r.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+        assert_eq!(r.read_line(), b"$88");
+        r.expect(EMPTY_RDB);
+    }
+
+    t.client.cmd(&[b"SET", b"foo", b"1"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"bar", b"2"]).expect(b"+OK\r\n");
+
+    let set_foo = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n";
+    let set_bar = b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n";
+    r1.expect(set_foo).expect(set_bar);
+    r2.expect(set_foo).expect(set_bar);
 }

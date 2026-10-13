@@ -1,5 +1,8 @@
 use crate::{client::Conn, commands::CmdResult, db::{Role, Store}, resp::Frame};
 
+pub const EMPTY_RDB: &[u8] =
+ b"REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\x08\xbce\xfa\x08used-mem\xc2\xb0\xc4\x10\x00\xfa\x08aof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
+
 pub fn cmd_info(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     let section = args.get(1).and_then(Frame::as_bulk);
     let mut out = String::new();
@@ -28,7 +31,11 @@ pub fn cmd_replconf(_args: &[Frame], _conn: &mut Conn, _store: &mut Store) -> Cm
     Ok(vec![Frame::simple("OK")])
 }
 
-pub fn cmd_psync(_args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+pub fn cmd_psync(_args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult {
+    store.replicas.insert(conn.id, conn.out_tx.clone());
     let reply = format!("FULLRESYNC {} {}", store.master_replid, store.master_repl_offset);
-    Ok(vec![Frame::simple(reply)])
+    Ok(vec![
+        Frame::simple(reply),
+        Frame::Rdb(EMPTY_RDB.to_vec())
+    ])
 }

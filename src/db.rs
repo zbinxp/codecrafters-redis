@@ -44,6 +44,7 @@ pub(crate) struct Db {
     pub role: Role,
     pub master_replid: String,
     pub master_repl_offset: u64,
+    pub replicas: HashMap<u64, Outbox>,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
@@ -59,6 +60,7 @@ impl Db {
             role,
             master_replid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".into(),
             master_repl_offset: 0,
+            replicas: HashMap::new(),
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {
