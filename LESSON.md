@@ -1,8 +1,9 @@
 # LESSON.md — 经验与教训汇总
 
 > 项目：CodeCrafters "Build Your Own Redis"（Rust）。
-> 覆盖范围：la7（SET/GET）→ xj7（BLPOP 超时），含 jp1（LPOP count）、ec3（BLPOP 阻塞）与测试基础设施重构。
-> 最后更新：2026-09-27。
+> 覆盖范围：la7（SET/GET）→ na2（WAIT），含模块化重构、Transactions、Optimistic
+> Locking 与 Replication。
+> 最后更新：2026-10-14。
 
 ---
 
@@ -317,7 +318,123 @@ struct Db {
 
 ---
 
-## 7. 一句话原则
+## 7. 模块化重构 / 事务 / 乐观锁 / 复制（2026-10 追加）
+
+### 7.1 lib 与 bin 是两个 crate
+
+同一 package 里 `src/lib.rs` 和 `src/main.rs` **各自是独立的 crate root**，`mod` 不跨 crate。
+`main.rs` 要用库里的类型，必须 `use <package_name>::...`，且路径上每一级都要 `pub`
+（`pub(crate)` 对 binary crate 不可见）。
+
+不要在两个 crate root 都写 `mod resp;`——`resp.rs` 会被编译两遍，产生**两个不同的 `Frame`
+类型**，`db::Entry` 里装的是库的 Frame，main 传的是 bin 的 Frame，全是类型错误。
+
+推荐形态：库拥有全部模块，只 `pub` 出 `Config` + `run(config)`；`main.rs` 只做 CLI 解析。
+可见性口诀：`pub(crate)` = 本 crate 内跨模块；`pub` = 对外（另一个 crate 也能用）。
+
+### 7.2 错误类型化 & 统一返回值
+
+`RedisError { message: String }` 集中所有 wire 消息（每种一个构造器）。
+**错误文案必须逐字节不变**——几百个集成测试精确断言错误行，改一个字就可能全红；
+重构时若改了文案又顺手改测试断言，会把回归藏起来。
+
+统一用 `type CmdResult = Result<Vec<Frame>, RedisError>`：一条命令回 0..N 帧，
+**空 vec 表示「无回复」**（`*0\r\n`、`REPLCONF ACK`），比 `Option` 更统一。handler
+返回 `Result` 后，边界处再统一转 `Frame::Err(e.message)`，`?` 才真正省代码。
+
+### 7.3 把「每连接状态」抽成 `Conn`
+
+`Handler = fn(&[Frame], &mut Conn, &mut Store) -> CmdResult`。`Conn` 装
+`id / subscriptions / out_tx / multi / watched / from_master`。这样 `SUBSCRIBE`、`MULTI`、
+`WATCH`、只读副本判断都能在 handler 层拿到连接状态，不必把逻辑堆进 `StreamHandler`。
+`&mut conn` 与 `&mut store` 是 `StreamHandler` 的**不相交字段**，可同时可变借用。
+
+### 7.4 事务：入队与 EXEC
+
+- MULTI 后，`execute` 把所有**非控制命令** push 进 `conn.multi` 并回 `+QUEUED`；控制命令
+  `MULTI/EXEC/DISCARD/WATCH/UNWATCH` 正常走 handler。
+- `EXEC` 用 `conn.multi.take()` 清队列（否则 EXEC 后连接还停在 MULTI），逐条递归
+  `execute`，返回 `Frame::Array(各命令回复)`；单条失败塞 `Frame::Err` 不中断。
+- 入队检查要放在 `lookup` **之前**（否则 `BLPOP` 这种不在 lookup 里的命令会变成 unknown）。
+
+### 7.5 WATCH：追踪「被改过」，不比较值
+
+官方 Notes 给了两条硬规则：
+- **不能比较值**：改完再改回原值也要 abort → 用版本号。
+- **不能全局 dirty**：只有被 watch 的 key 变了才 abort → 必须按 key。
+
+实现：`Db.versions: HashMap<key, u64>` + `version_seq`，`Db::touch(key)` 命中即 bump；
+`Conn.watched: HashMap<key, u64>` 在 WATCH 时记版本；EXEC 比对，任一不同 → 返 `*-1`。
+`touch` 只在**真的改到了**时调（`LPOP k 0`、`ZREM 不存在的成员` 不 touch，否则假 abort）。
+EXEC/DISCARD 后都清 watched。
+
+### 7.6 主从复制：主库侧
+
+- `Db.replicas: HashMap<conn_id, Outbox>`。副本发 `PSYNC ? -1` 时把该连接的 `out_tx` 登记
+  进来；`cmd_psync` 回 `+FULLRESYNC <replid> <offset>\r\n` + 空 RDB。
+- 空 RDB 用 `Frame::Rdb(Vec<u8>)` 编码成 `$<len>\r\n<bytes>`（**没有尾 CRLF**，和普通
+  bulk string 不同）。
+- 写命令成功后，`dispatch::execute` 把原始 `Frame::Array(args)` 发给每个 replica 的 outbox，
+  并 `master_repl_offset += cmd.frame_len()`。
+- `REPLCONF ACK <offset>` → 记 `replica_acks[conn_id] = offset`，**不回响应**。
+- `WAIT <n> <timeout>`：目标 = 当前 `master_repl_offset`；给所有副本发 `REPLCONF GETACK *`，
+  轮询 `replica_acks` 里 `>= target` 的数量，达标或超时就返回该数量。
+
+### 7.7 主从复制：副本侧
+
+握手：`PING`（等 `+PONG`）→ `REPLCONF listening-port`（等 `+OK`）→ `REPLCONF capa psync2`
+（等 `+OK`）→ `PSYNC ? -1`（读掉 `+FULLRESYNC`）→ 读 `$<len>\r\n` + RDB。
+之后 `Decoder` 循环解析主库命令流：`REPLCONF GETACK *` 回 `REPLCONF ACK <offset>`；其它命令
+用一个 `from_master=true` 的一次性 `Conn` 调 `execute`（**忽略返回 = 不回响应**）。副本本地维护
+`offset`（处理过的字节数），GETACK 自身不计入**当次** ACK。
+
+只读副本：客户端写 → `-READONLY You can't write against a read only replica.`；复制链接
+（`from_master`）豁免。
+
+### 7.8 复制里踩过的坑
+
+- **`WAIT` 不能是同步 handler**：它要等 ACK，而 ACK 由**别的连接 task** 处理、也要抢
+  `store` 锁。持锁等待会和它死锁。必须像 `BLPOP` 一样在连接循环里特判 async，且每次
+  `lock()` 只做一小段、立刻释放。
+- **`WAIT <n>` 的返回**：一旦 acked ≥ n 就返回**当前** acked 数（不是等到 n）。所以 2 个
+  副本下 `WAIT 1` 返回 `:1` 是正常的；要确定性等于 2 就测 `WAIT 2`。
+- **`+FULLRESYNC` 被读两次**：`send_and_read_reply(PSYNC)` 已经消费了那一行，再补一个
+  `read_line` 会读走 `$<len>\r\n`，导致 RDB 长度解析读到二进制垃圾而失败。
+- **读定长二进制**：`read_exact(&mut rdb)`，或 `read(&mut rdb[got..])`。写成
+  `read(&mut rdb)` 每次都从 index 0 覆盖，分片时数据错位。
+- **`Decoder` 只解析请求数组**（`*...$...`）。主库的 `+PONG`/`+OK`/`+FULLRESYNC` 是
+  simple string，`Decoder` 返回 `None` → 握手阶段要手动逐字节 `read_line`。
+
+### 7.9 二进制常量与字面量
+
+空 RDB 这类二进制：`base64 -d | xxd` 解码后硬编码 `b"..."`。**坑**：Rust 字符串字面量
+**可以跨行，且会把换行和续行缩进算进内容**（除非行尾 `\`）。我们把 88 字节的空 RDB 写成
+跨行字面量，实际变成 90 字节，而测试因为**复制了同一份错误常量**而假绿。教训：二进制常量
+走**单一权威表示**（hex/base64 还原），别在测试里手抄。
+
+### 7.10 测试复制的技巧
+
+- 泛化基座：`Server::start_on(addr, extra_args)` + `Client::connect_to(addr)`，才能在一台
+  机器上起「主库 + 多个副本」。
+- **mock-master**：测试自己 `TcpListener::bind("127.0.0.1:0")` 当主库，起副本指向它，断言
+  副本发来的字节；`accept` 用非阻塞轮询 + deadline，避免永久 hang（std 的 `accept` 无超时）。
+- **挑空闲端口**：`TcpListener::bind(":0").local_addr()`，那个临时 listener 在语句结束即 drop，
+  端口归还，子进程随即绑定。用 `127.0.0.1:1` 这类「死端口」可让副本握手快速失败但仍保留副本角色。
+- 跨进程有竞态：用轮询（GET/WAIT）或短 sleep，别假设「发完立刻能读到」。
+- `assert_*` helper 要**按预期长度精确读**，否则可能把后续字节吞进断言缓冲。
+- `dbg!`/`println!` 在测试里默认被 libtest **捕获**，`cargo test -- --nocapture` 才显示；
+  `dbg!` 的输出格式带 `文件:行:列`。
+
+### 7.11 编辑器 / 工作流
+
+- VSCode rust-analyzer 的 **Organize Imports**（`editor.codeActionsOnSave` 里的
+  `source.organizeImports`）会在保存时把同 crate 的 `use` 合并成**一整行**，和 rustfmt
+  （默认会换行）行为相反。要保留换行就把 `source.organizeImports` 设成 `never`。
+- 纯搬移 / 纯格式化与语义改动**分开 commit**；重构要逐字节行为不变，别顺手改文案。
+
+---
+
+## 8. 一句话原则
 
 1. **不确定就问/查官方 spec**，别凭直觉（`codecrafters task -stage`）。
 2. **改代码前后都跑测试**，并且让新测试在旧实现上先红。

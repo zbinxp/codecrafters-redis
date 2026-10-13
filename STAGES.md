@@ -4,11 +4,11 @@
 > Order verified against `codecrafters task -stage +N` (boundaries: cc3, fn4, ic1, jn4).
 > Source: codecrafters-io/build-your-own-redis course-definition. Generated: 2026-09-27.
 >
-> **Progress: 46 done.** core #1–7, Lists #8–18, Streams #19–31.
+> **Progress: 83 done.** core #1–7, Lists #8–18, Streams #19–31,
+> Transactions #32–42, Optimistic Locking #43–50, Replication #51–68.
 > Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** and are done.
-> **Backfilling now:** Transactions #32–42 → Optimistic Locking #43–50 →
-> Replication #51–68 → RDB #69–74 → AOF #75–84.
-> **NEXT: `si4` — The INCR command (1/3) (#32).**
+> **NEXT: `zg5` — RDB file config (#69)**, then AOF #75–84, Bitmaps #100–108,
+> Geospatial #109–116, Authentication #117–124.
 
 | # | Stage | Slug | Group | Status |
 |---|-------|------|-------|--------|
@@ -43,43 +43,43 @@
 | 29 | Blocking reads | `bs1` | Streams | done |
 | 30 | Blocking reads without timeout | `hw1` | Streams | done |
 | 31 | Blocking reads using $ | `xu1` | Streams | done |
-| 32 | The INCR command (1/3) | `si4` | Transactions | **NEXT** |
-| 33 | The INCR command (2/3) | `lz8` | Transactions |  |
-| 34 | The INCR command (3/3) | `mk1` | Transactions |  |
-| 35 | The MULTI command | `pn0` | Transactions |  |
-| 36 | The EXEC command | `lo4` | Transactions |  |
-| 37 | Empty transaction | `we1` | Transactions |  |
-| 38 | Queueing commands | `rs9` | Transactions |  |
-| 39 | Executing a transaction | `fy6` | Transactions |  |
-| 40 | The DISCARD command | `rl9` | Transactions |  |
-| 41 | Failures within transactions | `sg9` | Transactions |  |
-| 42 | Multiple transactions | `jf8` | Transactions |  |
-| 43 | The WATCH command | `jb7` | Optimistic Locking |  |
-| 44 | WATCH inside transaction | `jq9` | Optimistic Locking |  |
-| 45 | Tracking key modifications | `mh8` | Optimistic Locking |  |
-| 46 | Watching multiple keys | `fp0` | Optimistic Locking |  |
-| 47 | Watching missing keys | `uo9` | Optimistic Locking |  |
-| 48 | The UNWATCH command | `bn1` | Optimistic Locking |  |
-| 49 | Unwatch on EXEC | `fn4` | Optimistic Locking |  |
-| 50 | Unwatch on DISCARD | `hq1` | Optimistic Locking |  |
-| 51 | Configure listening port | `bw1` | Replication |  |
-| 52 | The INFO command | `ye5` | Replication |  |
-| 53 | The INFO command on a replica | `hc6` | Replication |  |
-| 54 | Initial replication ID and offset | `xc1` | Replication |  |
-| 55 | Send handshake (1/3) | `gl7` | Replication |  |
-| 56 | Send handshake (2/3) | `eh4` | Replication |  |
-| 57 | Send handshake (3/3) | `ju6` | Replication |  |
-| 58 | Receive handshake (1/2) | `fj0` | Replication |  |
-| 59 | Receive handshake (2/2) | `vm3` | Replication |  |
-| 60 | Empty RDB transfer | `cf8` | Replication |  |
-| 61 | Single-replica propagation | `zn8` | Replication |  |
-| 62 | Multi-replica propagation | `hd5` | Replication |  |
-| 63 | Command processing | `yg4` | Replication |  |
-| 64 | ACKs with no commands | `xv6` | Replication |  |
-| 65 | ACKs with commands | `yd3` | Replication |  |
-| 66 | WAIT with no replicas | `my8` | Replication |  |
-| 67 | WAIT with no commands | `tu8` | Replication |  |
-| 68 | WAIT with multiple commands | `na2` | Replication |  |
+| 32 | The INCR command (1/3) | `si4` | Transactions | done |
+| 33 | The INCR command (2/3) | `lz8` | Transactions | done |
+| 34 | The INCR command (3/3) | `mk1` | Transactions | done |
+| 35 | The MULTI command | `pn0` | Transactions | done |
+| 36 | The EXEC command | `lo4` | Transactions | done |
+| 37 | Empty transaction | `we1` | Transactions | done |
+| 38 | Queueing commands | `rs9` | Transactions | done |
+| 39 | Executing a transaction | `fy6` | Transactions | done |
+| 40 | The DISCARD command | `rl9` | Transactions | done |
+| 41 | Failures within transactions | `sg9` | Transactions | done |
+| 42 | Multiple transactions | `jf8` | Transactions | done |
+| 43 | The WATCH command | `jb7` | Optimistic Locking | done |
+| 44 | WATCH inside transaction | `jq9` | Optimistic Locking | done |
+| 45 | Tracking key modifications | `mh8` | Optimistic Locking | done |
+| 46 | Watching multiple keys | `fp0` | Optimistic Locking | done |
+| 47 | Watching missing keys | `uo9` | Optimistic Locking | done |
+| 48 | The UNWATCH command | `bn1` | Optimistic Locking | done |
+| 49 | Unwatch on EXEC | `fn4` | Optimistic Locking | done |
+| 50 | Unwatch on DISCARD | `hq1` | Optimistic Locking | done |
+| 51 | Configure listening port | `bw1` | Replication | done |
+| 52 | The INFO command | `ye5` | Replication | done |
+| 53 | The INFO command on a replica | `hc6` | Replication | done |
+| 54 | Initial replication ID and offset | `xc1` | Replication | done |
+| 55 | Send handshake (1/3) | `gl7` | Replication | done |
+| 56 | Send handshake (2/3) | `eh4` | Replication | done |
+| 57 | Send handshake (3/3) | `ju6` | Replication | done |
+| 58 | Receive handshake (1/2) | `fj0` | Replication | done |
+| 59 | Receive handshake (2/2) | `vm3` | Replication | done |
+| 60 | Empty RDB transfer | `cf8` | Replication | done |
+| 61 | Single-replica propagation | `zn8` | Replication | done |
+| 62 | Multi-replica propagation | `hd5` | Replication | done |
+| 63 | Command processing | `yg4` | Replication | done |
+| 64 | ACKs with no commands | `xv6` | Replication | done |
+| 65 | ACKs with commands | `yd3` | Replication | done |
+| 66 | WAIT with no replicas | `my8` | Replication | done |
+| 67 | WAIT with no commands | `tu8` | Replication | done |
+| 68 | WAIT with multiple commands | `na2` | Replication | done |
 | 69 | RDB file config | `zg5` | RDB Persistence |  |
 | 70 | Read a key | `jz6` | RDB Persistence |  |
 | 71 | Read a string value | `gc6` | RDB Persistence |  |
