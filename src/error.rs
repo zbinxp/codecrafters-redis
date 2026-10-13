@@ -89,5 +89,9 @@ impl RedisError {
 
     pub(crate) fn watch_inside_multi() -> Self {
        RedisError { message: "ERR WATCH inside MULTI is not allowed".into() }
-   }
+    }
+
+    pub(crate) fn readonly() -> Self {
+        RedisError { message: "READONLY You can't write against a read only replica.".into() }
+    }
 }

@@ -5,7 +5,7 @@ use crate::commands::{
     cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd,
     cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
-use crate::db::Store;
+use crate::db::{Store, Role};
 use crate::error::RedisError;
 use crate::resp::Frame;
 
@@ -93,6 +93,11 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
                 Frame::bulk(msg),
             ])]);
         }
+    }
+
+    // replica: readonly mode
+    if is_write_command(name) && matches!(store.role, Role::Replica { .. }) && !conn.from_master {
+        return Err(RedisError::readonly())
     }
 
     // multi mode: all command allowed for now

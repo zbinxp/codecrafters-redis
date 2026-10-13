@@ -3230,3 +3230,125 @@ fn master_propagates_writes_to_multiple_replicas() {
     r1.expect(set_foo).expect(set_bar);
     r2.expect(set_foo).expect(set_bar);
 }
+
+/// yg4: the replica applies commands propagated over the replication link.
+/// We play the master, complete the handshake, send the RDB and a SET, then
+/// check the replica's own dataset over a separate client connection.
+#[test]
+fn replica_applies_propagated_commands() {
+    let _guard = lock_server();
+
+    let master = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
+    let master_addr = master.local_addr().unwrap();
+    master.set_nonblocking(true).unwrap();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let replica_port = replica_addr.rsplit(':').next().unwrap();
+
+    let replicaof = format!("{} {}", master_addr.ip(), master_addr.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    // Accept the replica's replication connection.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut sock, _) = loop {
+        match master.accept() {
+            Ok(pair) => break pair,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    panic!("replica never connected to the master");
+                }
+                sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        }
+    };
+    sock.set_nonblocking(false).unwrap();
+    sock.set_read_timeout(Some(TIMEOUT)).unwrap();
+
+    // Handshake, replying to each step like a real master.
+    assert_master_should_reply(&mut sock, "*1\r\n$4\r\nPING\r\n".to_string());
+    sock.write_all(b"+PONG\r\n").unwrap();
+
+    let replconf_port = format!(
+        "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n",
+        replica_port.len(),
+        replica_port
+    );
+    assert_master_should_reply(&mut sock, replconf_port);
+    sock.write_all(b"+OK\r\n").unwrap();
+
+    assert_master_should_reply(
+        &mut sock,
+        "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".to_string(),
+    );
+    sock.write_all(b"+OK\r\n").unwrap();
+
+    assert_master_should_reply(
+        &mut sock,
+        "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".to_string(),
+    );
+
+    // Full resync: FULLRESYNC + the empty RDB.
+    sock.write_all(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        .unwrap();
+    let mut rdb = format!("${}\r\n", EMPTY_RDB.len()).into_bytes();
+    rdb.extend_from_slice(EMPTY_RDB);
+    sock.write_all(&rdb).unwrap();
+
+    // Propagate a write over the replication link.
+    sock.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n")
+        .unwrap();
+
+    // The replica must apply it; poll via its own client port (the replica
+    // task and this GET race for the store lock).
+    let mut c = TcpStream::connect(&replica_addr).expect("connect to replica");
+    c.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        c.write_all(b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n").unwrap();
+        let mut buf = [0u8; 64];
+        let n = c.read(&mut buf).expect("read from replica");
+        if &buf[..n] == b"$1\r\n1\r\n" {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "replica did not apply the propagated SET; last reply {:?}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+        }
+        sleep(Duration::from_millis(20));
+    }
+}
+
+/// A replica rejects client write commands with -READONLY, but still serves
+/// reads. The master link is exempt (see replica_applies_propagated_commands).
+#[test]
+fn replica_rejects_client_writes() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+
+    // Point at a port with no listener: the handshake fails fast, but the
+    // server still starts and keeps the replica role.
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"SET", b"foo", b"1"])
+        .expect(b"-READONLY You can't write against a read only replica.\r\n");
+    // Reads are still allowed.
+    c.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n");
+}
