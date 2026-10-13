@@ -3143,16 +3143,16 @@ fn replica_sends_full_handshake() {
 }
 
 fn assert_master_should_reply(sock:&mut TcpStream, expect: String) {
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 64];
-    while got.len() < expect.len() {
-        match sock.read(&mut chunk) {
+    let mut got:usize = 0;
+    let mut chunk = vec![0u8; expect.len()];
+    while got < expect.len() {
+        match sock.read(&mut chunk[got..]) {
             Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&chunk[..n]),
+            Ok(n) => got += n,
             Err(e) => panic!("reading from replica failed: {e}"),
         }
     }
-    assert_eq!(&got, expect.as_bytes());
+    assert_eq!(&chunk, expect.as_bytes());
 }
 
 
@@ -3300,12 +3300,19 @@ fn replica_applies_propagated_commands() {
     sock.write_all(&rdb).unwrap();
 
 
-    // xv6: GETACK 必须回 ACK 0
-    sock.write_all(b"*3\r\n$8\r\nreplconf\r\n$6\r\ngetack\r\n$1\r\n*\r\n").unwrap();
-    assert_master_should_reply(
-        &mut sock,
-        "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n".to_string(),
-    );
+    let getack = b"*3\r\n$8\r\nreplconf\r\n$6\r\ngetack\r\n$1\r\n*\r\n";
+    let ack = |n: u64| format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n",
+    n.to_string().len(), n);
+
+    sock.write_all(getack).unwrap();
+    assert_master_should_reply(&mut sock, ack(0));
+    sock.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
+    sock.write_all(getack).unwrap();
+    assert_master_should_reply(&mut sock, ack(51));
+    sock.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n").unwrap();
+    sock.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n").unwrap();
+    sock.write_all(getack).unwrap();
+    assert_master_should_reply(&mut sock, ack(146));
 
     // Propagate a write over the replication link.
     sock.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n")
@@ -3359,4 +3366,33 @@ fn replica_rejects_client_writes() {
         .expect(b"-READONLY You can't write against a read only replica.\r\n");
     // Reads are still allowed.
     c.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n");
+}
+
+#[test]
+fn wait_with_no_replicas_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"WAIT", b"0", b"60000"]).expect(b":0\r\n");
+}
+
+/// tu8: with connected (idle) replicas, WAIT returns the replica count,
+/// regardless of the requested number.
+#[test]
+fn wait_returns_connected_replica_count() {
+    let mut t = TestCtx::new();
+    let mut r1 = t.connect();
+    let mut r2 = t.connect();
+
+    for r in [&mut r1, &mut r2] {
+        r.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+        r.cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+            .expect(b"+OK\r\n");
+        r.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+        r.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+        assert_eq!(r.read_line(), b"$88");
+        r.expect(EMPTY_RDB);
+    }
+
+    t.client.cmd(&[b"WAIT", b"1", b"500"]).expect(b":2\r\n");
+    t.client.cmd(&[b"WAIT", b"2", b"500"]).expect(b":2\r\n");
+    t.client.cmd(&[b"WAIT", b"3", b"500"]).expect(b":2\r\n");
 }

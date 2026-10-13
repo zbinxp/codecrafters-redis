@@ -39,3 +39,8 @@ pub fn cmd_psync(_args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResu
         Frame::Rdb(EMPTY_RDB.to_vec())
     ])
 }
+
+pub fn cmd_wait(_args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    // my8: wait with no replicas
+    Ok(vec![Frame::Int(store.replicas.len() as i64)])
+}

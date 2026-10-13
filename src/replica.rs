@@ -29,21 +29,25 @@ pub async fn handshake(host: String, port: u16, own_port: u16, store: Arc<Mutex<
     conn.from_master = true;
     let mut decoder = Decoder::new();
     let mut chunk = [0u8; 1024];
+    let mut offset: usize = 0;
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => return None,
             Ok(n) => {
                 decoder.extend(&chunk[..n]);
                 while let Some(frame) = decoder.parse() {
+                    let len = frame_len(&frame);
                     if is_getack(&frame) {
                         let mut buf = BytesMut::new();
-                        Frame::array(vec!["REPLCONF","ACK","0"]).encode(&mut buf);
+                        Frame::array(vec!["REPLCONF","ACK", &offset.to_string()]).encode(&mut buf);
                         if stream.write_all(&buf).await.is_err() {
                             return None
                         }
+                        offset += len;
                     } else {
                         let mut guard = store.lock().unwrap_or_else(|e|e.into_inner());
                         let _ = execute(&frame, &mut conn, &mut guard);
+                        offset += len;
                     }
                 }
             },
@@ -81,4 +85,10 @@ fn is_getack(frame: &Frame) -> bool {
     args.len() == 3 
     && args[0].as_bulk().is_some_and(|b| b.eq_ignore_ascii_case(b"replconf"))
     && args[1].as_bulk().is_some_and(|b|b.eq_ignore_ascii_case(b"getack"))
+}
+
+fn frame_len(frame: &Frame) -> usize {
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    buf.len()
 }

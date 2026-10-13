@@ -60,6 +60,7 @@ pub use transaction::cmd_unwatch;
 pub use server::cmd_info;
 pub use server::cmd_replconf;
 pub use server::cmd_psync;
+pub use server::cmd_wait;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)
