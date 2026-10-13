@@ -35,8 +35,16 @@ pub async fn handshake(host: String, port: u16, own_port: u16, store: Arc<Mutex<
             Ok(n) => {
                 decoder.extend(&chunk[..n]);
                 while let Some(frame) = decoder.parse() {
-                    let mut guard = store.lock().unwrap_or_else(|e|e.into_inner());
-                    let _ = execute(&frame, &mut conn, &mut guard);
+                    if is_getack(&frame) {
+                        let mut buf = BytesMut::new();
+                        Frame::array(vec!["REPLCONF","ACK","0"]).encode(&mut buf);
+                        if stream.write_all(&buf).await.is_err() {
+                            return None
+                        }
+                    } else {
+                        let mut guard = store.lock().unwrap_or_else(|e|e.into_inner());
+                        let _ = execute(&frame, &mut conn, &mut guard);
+                    }
                 }
             },
         }
@@ -64,4 +72,13 @@ async fn send_and_read_reply(stream: &mut TcpStream, frame: Frame) -> Option<Vec
     frame.encode(&mut buf);
     stream.write_all(&buf).await.ok()?;
     read_line(stream).await
+}
+
+fn is_getack(frame: &Frame) -> bool {
+    let Frame::Array(args) = frame else {
+        return false
+    };
+    args.len() == 3 
+    && args[0].as_bulk().is_some_and(|b| b.eq_ignore_ascii_case(b"replconf"))
+    && args[1].as_bulk().is_some_and(|b|b.eq_ignore_ascii_case(b"getack"))
 }

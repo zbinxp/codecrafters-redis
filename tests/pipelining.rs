@@ -3299,6 +3299,14 @@ fn replica_applies_propagated_commands() {
     rdb.extend_from_slice(EMPTY_RDB);
     sock.write_all(&rdb).unwrap();
 
+
+    // xv6: GETACK 必须回 ACK 0
+    sock.write_all(b"*3\r\n$8\r\nreplconf\r\n$6\r\ngetack\r\n$1\r\n*\r\n").unwrap();
+    assert_master_should_reply(
+        &mut sock,
+        "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n".to_string(),
+    );
+
     // Propagate a write over the replication link.
     sock.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n")
         .unwrap();
