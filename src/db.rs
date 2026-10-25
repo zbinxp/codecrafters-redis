@@ -48,6 +48,10 @@ pub(crate) struct Db {
     pub replic_acks: HashMap<u64, u64>,
     pub dir: String, // def: .
     pub dbfilename: String, // def "dump.rdb"
+    pub appendonly: String, // no
+    pub appenddirname: String, // appendonlydir
+    pub appendfilename: String, // appendonly.aof
+    pub appendfsync: String, // everysec
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
@@ -65,8 +69,16 @@ impl Db {
             master_repl_offset: 0,
             replicas: HashMap::new(),
             replic_acks: HashMap::new(),
-            dir: dir.unwrap_or(".".to_string()),
+            dir: dir.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".to_string())  
+            }),
             dbfilename: dbfilename.unwrap_or("dump.rdb".to_string()),
+            appendonly: "no".to_string(),
+            appenddirname: "appendonlydir".to_string(),
+            appendfilename: "appendonly.aof".to_string(),
+            appendfsync: "everysec".to_string()
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {

@@ -34,8 +34,8 @@ pub async fn run(config: Config) {
         Some((h, p)) => Role::Replica { host: h.clone(), port:*p },
         None => Role::Master
     };
-    let dir = config.dir.clone().unwrap_or(".".to_string());
-    let dbfilename = config.dbfilename.clone().unwrap_or("dump.rdb".to_string());
+    let dir = config.dir.clone().unwrap_or_else(||".".to_string());
+    let dbfilename = config.dbfilename.clone().unwrap_or_else(||"dump.rdb".to_string());
     let mut store = Store::new(role, config.dir, config.dbfilename);
     let path = format!("{}/{}", dir, dbfilename);
     if let Ok(bytes) = std::fs::read(&path) {

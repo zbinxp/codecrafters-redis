@@ -194,7 +194,8 @@ impl Client {
         self.fill_at_least(expected.len(), TIMEOUT);
         assert!(
             self.buf.len() >= expected.len() && &self.buf[..expected.len()] == expected,
-            "expected {expected:?}, buffered {:?}",
+            "expected {:?}, buffered {:?}",
+            String::from_utf8_lossy(expected),
             String::from_utf8_lossy(&self.buf)
         );
         self.buf.drain(..expected.len());
@@ -3455,6 +3456,13 @@ fn fresh_dir(name: &str) -> std::path::PathBuf {
 const ONE_KEY_RDB: &[u8] =
     b"REDIS0011\xfe\x00\xfb\x01\x00\x00\x03foo\x03bar\xff\x00\x00\x00\x00\x00\x00\x00\x00";
 
+/// Minimal RDB with two string keys: foo=bar and baz=qux.
+const TWO_KEY_RDB: &[u8] = b"REDIS0011\xfe\x00\xfb\x02\x00\x00\x03foo\x03bar\x00\x03baz\x03qux\xff\x00\x00\x00\x00\x00\x00\x00\x00";
+
+/// RDB with an expired key (foo), a key without expiry (baz), and a key with
+/// a far-future expiry (fut).
+const RDB_WITH_EXPIRY: &[u8] = b"REDIS0011\xfe\x00\xfb\x03\x01\xfd\x01\x00\x00\x00\x00\x03foo\x03bar\x00\x03baz\x03qux\xfd\x00W\x86\xf4\x00\x03fut\x03val\xff\x00\x00\x00\x00\x00\x00\x00\x00";
+
 fn free_addr() -> String {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -3493,6 +3501,47 @@ fn keys_returns_keys_loaded_from_rdb() {
     c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
 }
 
+/// jw4: an RDB with several keys loads them all. HashMap iteration order is
+/// unspecified, so compare the keys as a set.
+#[test]
+fn keys_returns_all_keys_from_multi_key_rdb() {
+    let _guard = lock_server();
+    let dir = fresh_dir("rdb-two-keys");
+    std::fs::write(dir.join("dump.rdb"), TWO_KEY_RDB).unwrap();
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
+    let mut c = Client::connect_to(&addr);
+
+    c.cmd(&[b"KEYS", b"*"]);
+    assert_eq!(c.read_line(), b"*2");
+    let mut keys = Vec::new();
+    for _ in 0..2 {
+        assert!(c.read_line().starts_with(b"$"));
+        keys.push(c.read_line());
+    }
+    keys.sort();
+    assert_eq!(keys, vec![b"baz".to_vec(), b"foo".to_vec()]);
+
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+    c.cmd(&[b"GET", b"baz"]).expect(b"$3\r\nqux\r\n");
+}
+
+/// sm4: expired keys from the RDB are absent; non-expired ones are readable.
+#[test]
+fn rdb_applies_expiry_on_load() {
+    let _guard = lock_server();
+    let dir = fresh_dir("rdb-expiry");
+    std::fs::write(dir.join("dump.rdb"), RDB_WITH_EXPIRY).unwrap();
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n"); // expired
+    c.cmd(&[b"GET", b"baz"]).expect(b"$3\r\nqux\r\n"); // no expiry
+    c.cmd(&[b"GET", b"fut"]).expect(b"$3\r\nval\r\n"); // future expiry
+}
+
 /// jz6 note: a missing RDB file means an empty database.
 #[test]
 fn keys_without_rdb_file_returns_empty() {
@@ -3503,4 +3552,25 @@ fn keys_without_rdb_file_returns_empty() {
     let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
     let mut c = Client::connect_to(&addr);
     c.cmd(&[b"KEYS", b"*"]).expect(b"*0\r\n");
+}
+
+#[test]
+fn config_get_aof_defaults() {
+    let mut t = TestCtx::new();   // 默认启动（无 --dir）
+    t.client.cmd(&[b"CONFIG", b"GET", b"appendonly"])
+        .expect(b"*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n");
+    t.client.cmd(&[b"CONFIG", b"GET", b"appenddirname"])
+        .expect(b"*2\r\n$13\r\nappenddirname\r\n$13\r\nappendonlydir\r\n");
+    t.client.cmd(&[b"CONFIG", b"GET", b"appendfilename"])
+        .expect(b"*2\r\n$14\r\nappendfilename\r\n$14\r\nappendonly.aof\r\n");
+    t.client.cmd(&[b"CONFIG", b"GET", b"appendfsync"])
+        .expect(b"*2\r\n$11\r\nappendfsync\r\n$8\r\neverysec\r\n");
+}
+
+#[test]
+fn config_get_dir_defaults_to_cwd() {
+    let mut t = TestCtx::new();
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let expected = format!("*2\r\n$3\r\ndir\r\n${}\r\n{}\r\n", cwd.len(), cwd);
+    t.client.cmd(&[b"CONFIG", b"GET", b"dir"]).expect(expected.as_bytes());
 }

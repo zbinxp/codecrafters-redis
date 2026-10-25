@@ -1,4 +1,6 @@
-use crate::db::{Entry, Store, Value};
+use std::time::{Duration, Instant};
+
+use crate::{db::{Entry, Store, Value}, util::now_ms};
 
 enum Size {
     Len(usize),
@@ -89,19 +91,29 @@ impl Reader<'_> {
         Some(u64::from_le_bytes([b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]]))
     }
 
-    fn read_entry(&mut self, store: &mut Store) -> Option<()>{
+    fn read_entry(&mut self, store: &mut Store, expire_at_ms:Option<u64>) -> Option<()>{
         let ty = self.u8()?;
-        self.read_entry_with(store, ty)
+        self.read_entry_with(store, ty, expire_at_ms)
     }
 
-    fn read_entry_with(&mut self, store: &mut Store, ty:u8) -> Option<()> {
+    fn read_entry_with(&mut self, store: &mut Store, ty:u8, expire_at_ms:Option<u64>) -> Option<()> {
         match ty {
             0x00 => {
                 let key = self.string()?;
                 let value = self.string()?;
+                let expires_at = match expire_at_ms {
+                    Some(ms) => {
+                        let now = now_ms();
+                        if ms <= now {
+                            return Some(())
+                        }
+                        Instant::now().checked_add(Duration::from_millis(ms-now))
+                    },
+                    None => None
+                };
                 store.data.insert(key, Entry {
                     value: Value::String(value),
-                    expires_at: None
+                    expires_at
                 });
                 Some(())
             },
@@ -139,16 +151,16 @@ pub fn load(bytes: &[u8], store: &mut Store) {
             },
             0xFC => {
                 // read_entry, expire timeout in millis
-                reader.u64_le();
-                reader.read_entry(store);
+                let ms = reader.u64_le();
+                reader.read_entry(store, ms);
             },
             0xFD => {
                 // read_entry, expire timeout in sec
-                reader.u32_le();
-                reader.read_entry(store);
+                let ms = reader.u32_le().map(|sec|sec as u64*1000);
+                reader.read_entry(store, ms);
             },
             ty => {
-                reader.read_entry_with(store, ty);
+                reader.read_entry_with(store, ty, None);
             }
         }
     } 

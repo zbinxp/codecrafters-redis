@@ -64,6 +64,14 @@ pub fn cmd_config(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
         store.dir.clone()
     } else if param.eq_ignore_ascii_case(b"dbfilename") {
         store.dbfilename.clone()
+    } else if param.eq_ignore_ascii_case(b"appendonly") {
+        store.appendonly.clone()
+    } else if param.eq_ignore_ascii_case(b"appenddirname") {
+        store.appenddirname.clone()
+    } else if param.eq_ignore_ascii_case(b"appendfilename") {
+        store.appendfilename.clone()
+    } else if param.eq_ignore_ascii_case(b"appendfsync") {
+        store.appendfsync.clone()
     } else {
         return Ok(vec![Frame::Array(Vec::new())])
     };
