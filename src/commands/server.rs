@@ -53,6 +53,23 @@ pub fn cmd_psync(_args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResu
     ])
 }
 
+pub fn cmd_config(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    // CONFIG GET <param>
+    let sub = bulk_at(args, 1).unwrap_or(b"");
+    if !sub.eq_ignore_ascii_case(b"GET") {
+        return Err(RedisError::wrong_args("config"))
+    }
+    let param = bulk_at(args, 2).ok_or_else(||RedisError::wrong_args("config"))?;
+    let value = if param.eq_ignore_ascii_case(b"dir") {
+        store.dir.clone()
+    } else if param.eq_ignore_ascii_case(b"dbfilename") {
+        store.dbfilename.clone()
+    } else {
+        return Ok(vec![Frame::Array(Vec::new())])
+    };
+    Ok(vec![Frame::Array(vec![Frame::bulk(param), Frame::bulk(value)])])
+}
+
 pub async fn cmd_wait(args: &[Frame], store: Arc<Mutex<Store>>) -> Result<Frame, RedisError> {
     let args1 = bulk_at(args, 1).ok_or(RedisError::wrong_args("wait"))?;
     let args2 = bulk_at(args, 2).ok_or(RedisError::wrong_args("wait"))?;
@@ -87,4 +104,11 @@ pub async fn cmd_wait(args: &[Frame], store: Arc<Mutex<Store>>) -> Result<Frame,
         sleep(Duration::from_millis(10)).await;
     }
 
+}
+
+pub fn cmd_keys(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    let _pattern = bulk_at(args, 1).ok_or_else(|| RedisError::wrong_args("keys"))?;
+    // for now, only support "*"
+    let keys = store.data.keys().map(|k| Frame::bulk(k)).collect();
+    Ok(vec![Frame::Array(keys)])
 }

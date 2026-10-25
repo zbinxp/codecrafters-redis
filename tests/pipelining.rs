@@ -3440,3 +3440,67 @@ fn wait_returns_acked_replica_count() {
     c.cmd(&[b"SET", b"bar", b"456"]).expect(b"+OK\r\n");
     c.cmd(&[b"WAIT", b"2", b"500"]).expect(b":2\r\n");
 }
+
+/// A fresh temp dir unique to this test. Tests are serialised by
+/// `lock_server`, so process id + a name is enough.
+fn fresh_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cc-redis-{}-{}", std::process::id(), name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Minimal RDB with one string key: foo = bar.
+/// REDIS0011 / db0 / 1 key 0 expires / string / "foo" / "bar" / EOF / crc
+const ONE_KEY_RDB: &[u8] =
+    b"REDIS0011\xfe\x00\xfb\x01\x00\x00\x03foo\x03bar\xff\x00\x00\x00\x00\x00\x00\x00\x00";
+
+fn free_addr() -> String {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn config_get_returns_dir_and_dbfilename() {
+    let _guard = lock_server();
+    let dir = fresh_dir("config");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
+    let mut c = Client::connect_to(&addr);
+    let expected_dir = format!("*2\r\n$3\r\ndir\r\n${}\r\n{}\r\n", dir_s.len(), dir_s);
+    c.cmd(&[b"CONFIG", b"GET", b"dir"])
+        .expect(expected_dir.as_bytes());
+    c.cmd(&[b"CONFIG", b"GET", b"dbfilename"])
+        .expect(b"*2\r\n$10\r\ndbfilename\r\n$8\r\ndump.rdb\r\n");
+}
+
+/// jz6: keys from the RDB file are loaded at startup and listed by KEYS *.
+#[test]
+fn keys_returns_keys_loaded_from_rdb() {
+    let _guard = lock_server();
+    let dir = fresh_dir("rdb-one-key");
+    std::fs::write(dir.join("dump.rdb"), ONE_KEY_RDB).unwrap();
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"KEYS", b"*"]).expect(b"*1\r\n$3\r\nfoo\r\n");
+    // The loaded value is usable as a normal string key too.
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+}
+
+/// jz6 note: a missing RDB file means an empty database.
+#[test]
+fn keys_without_rdb_file_returns_empty() {
+    let _guard = lock_server();
+    let dir = fresh_dir("rdb-missing");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &["--dir", &dir_s, "--dbfilename", "dump.rdb"]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"KEYS", b"*"]).expect(b"*0\r\n");
+}

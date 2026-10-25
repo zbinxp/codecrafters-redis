@@ -7,6 +7,7 @@ mod commands;
 mod error;
 mod dispatch;
 mod replica;
+mod rdb;
 
 use std::sync::{Arc, Mutex};
 
@@ -20,19 +21,35 @@ use resp::{Frame};
 use db::{Store, Role};
 use connection::StreamHandler;
 
-pub async fn run(port: u16, replicaof: Option<(String, u16)>) {
-    let role = match &replicaof {
+pub struct Config {
+    pub port: u16,
+    pub replicaof: Option<(String, u16)>,
+    pub dir: Option<String>,
+    pub dbfilename: Option<String>,
+}
+
+
+pub async fn run(config: Config) {
+    let role = match &config.replicaof {
         Some((h, p)) => Role::Replica { host: h.clone(), port:*p },
         None => Role::Master
     };
-    let store = Arc::new(Mutex::new(Store::new(role)));
-
-    // if we're replica, connect to master with PING
-    if let Some((host, master_port)) = replicaof {
-        tokio::spawn(replica::handshake(host, master_port, port, store.clone()));
+    let dir = config.dir.clone().unwrap_or(".".to_string());
+    let dbfilename = config.dbfilename.clone().unwrap_or("dump.rdb".to_string());
+    let mut store = Store::new(role, config.dir, config.dbfilename);
+    let path = format!("{}/{}", dir, dbfilename);
+    if let Ok(bytes) = std::fs::read(&path) {
+        rdb::load(&bytes, &mut store);
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let store = Arc::new(Mutex::new(store));
+
+    // if we're replica, connect to master with PING
+    if let Some((host, master_port)) = config.replicaof {
+        tokio::spawn(replica::handshake(host, master_port, config.port, store.clone()));
+    }
+
+    let listener = TcpListener::bind(("127.0.0.1", config.port)).await.unwrap();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;

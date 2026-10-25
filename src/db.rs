@@ -4,7 +4,7 @@ use tokio::{sync::{
         mpsc,
         oneshot,
     }};
-use crate::resp::Frame;
+use crate::{resp::Frame};
 
 pub type Store = Db;
 pub type Outbox = mpsc::UnboundedSender<Frame>;
@@ -46,12 +46,14 @@ pub(crate) struct Db {
     pub master_repl_offset: u64,
     pub replicas: HashMap<u64, Outbox>,
     pub replic_acks: HashMap<u64, u64>,
+    pub dir: String, // def: .
+    pub dbfilename: String, // def "dump.rdb"
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
 
 impl Db {
-    pub(crate) fn new(role: Role) -> Self {
+    pub(crate) fn new(role: Role, dir: Option<String>, dbfilename: Option<String>) -> Self {
         Self {
             data: HashMap::new(),
             waiters: HashMap::new(),
@@ -63,6 +65,8 @@ impl Db {
             master_repl_offset: 0,
             replicas: HashMap::new(),
             replic_acks: HashMap::new(),
+            dir: dir.unwrap_or(".".to_string()),
+            dbfilename: dbfilename.unwrap_or("dump.rdb".to_string()),
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {

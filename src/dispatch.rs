@@ -1,9 +1,6 @@
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_llen, cmd_lpop,
-    cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush,
-    cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd,
-    cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
+    CmdResult, cmd_config, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_keys, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::{Store, Role};
 use crate::error::RedisError;
@@ -48,7 +45,8 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"INFO" => Some(cmd_info),
         b"REPLCONF" => Some(cmd_replconf),
         b"PSYNC" => Some(cmd_psync),
-        // b"WAIT" => Some(cmd_wait),
+        b"CONFIG" => Some(cmd_config),
+        b"KEYS" => Some(cmd_keys),
         _ => None,
     }
 }

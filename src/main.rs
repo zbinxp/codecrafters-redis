@@ -1,11 +1,18 @@
+use codecrafters_redis::Config;
+
 #[tokio::main]
 async fn main() {
     let cfg = parse_args(std::env::args());
-    codecrafters_redis::run(cfg.port, cfg.replicaof).await
+    codecrafters_redis::run(cfg).await
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
-    let mut cfg = Config {port: 6379, replicaof: None};
+    let mut cfg = Config {
+        port: 6379, 
+        replicaof: None,
+        dir: None,
+        dbfilename: None,
+    };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--port" => {
@@ -20,6 +27,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
                     }
                 }
             },
+            "--dir" => {
+                cfg.dir = args.next();
+            },
+            "--dbfilename" => {
+                cfg.dbfilename = args.next();
+            }
             _ => {}
         }
     }
@@ -28,10 +41,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
 }
 
 
-struct Config {
-    port: u16,
-    replicaof: Option<(String, u16)>,
-}
+
 
 #[cfg(test)]
 mod tests {
