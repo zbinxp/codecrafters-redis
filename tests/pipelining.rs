@@ -3627,3 +3627,20 @@ fn does_not_create_appendonly_dir_when_disabled() {
     ]);
     assert!(!dir.join("appendonlydir").exists());
 }
+
+#[test]
+fn creates_appendonly_file_when_enabled() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-file");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let path = dir.join("appendonlydir").join("appendonly.aof.1.incr.aof");
+    assert!(path.is_file(), "AOF file was not created: {path:?}");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}

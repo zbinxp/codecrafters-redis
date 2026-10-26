@@ -61,6 +61,14 @@ pub async fn run(config: Config) {
         if let Err(e) = std::fs::create_dir_all(&aof_dir) {
             eprintln!("failed to create AOF directory {aof_dir}: {e}");
         }
+        let aof_path = format!("{}/{}.1.incr.aof", aof_dir, store.appendfilename);
+        if let Err(e) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&aof_path)
+        {
+            eprintln!("failed to create AOF file {aof_path}: {e}");
+        }
     }
 
     let store = Arc::new(Mutex::new(store));
