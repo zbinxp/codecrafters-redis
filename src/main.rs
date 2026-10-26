@@ -8,40 +8,45 @@ async fn main() {
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
     let mut cfg = Config {
-        port: 6379, 
+        port: 6379,
         replicaof: None,
         dir: None,
         dbfilename: None,
+        appendonly: None,
+        appenddirname: None,
+        appendfilename: None,
+        appendfsync: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--port" => {
-                cfg.port = args.next().and_then(|v|v.parse().ok()).unwrap_or(6379);
-            },
+                cfg.port = args.next().and_then(|v| v.parse().ok()).unwrap_or(6379);
+            }
             "--replicaof" => {
                 if let Some(v) = args.next() {
-                    if let Some((h,p)) = v.split_once(" ") {
+                    if let Some((h, p)) = v.split_once(" ") {
                         cfg.replicaof = Some((h.to_string(), p.trim().parse().unwrap_or(0)));
-                    }else if let Some(p) = args.next() {
+                    } else if let Some(p) = args.next() {
                         cfg.replicaof = Some((v.to_string(), p.trim().parse().unwrap_or(0)));
                     }
                 }
-            },
+            }
             "--dir" => {
                 cfg.dir = args.next();
-            },
+            }
             "--dbfilename" => {
                 cfg.dbfilename = args.next();
             }
+            "--appendonly" => cfg.appendonly = args.next(),
+            "--appenddirname" => cfg.appenddirname = args.next(),
+            "--appendfilename" => cfg.appendfilename = args.next(),
+            "--appendfsync" => cfg.appendfsync = args.next(),
             _ => {}
         }
     }
 
     cfg
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -70,7 +75,7 @@ mod tests {
 
     #[test]
     fn parse_replicaof_two_arguments() {
-        let args = vec!["--replicaof".into(), "localhost".into(),"7788".into()];
+        let args = vec!["--replicaof".into(), "localhost".into(), "7788".into()];
         let cfg = parse_args(args.into_iter());
         assert_eq!(cfg.replicaof, Some(("localhost".into(), 7788)))
     }

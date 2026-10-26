@@ -3574,3 +3574,56 @@ fn config_get_dir_defaults_to_cwd() {
     let expected = format!("*2\r\n$3\r\ndir\r\n${}\r\n{}\r\n", cwd.len(), cwd);
     t.client.cmd(&[b"CONFIG", b"GET", b"dir"]).expect(expected.as_bytes());
 }
+
+#[test]
+fn config_get_reflects_aof_flags() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-flags");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "mydir",
+        "--appendfilename", "my.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"CONFIG", b"GET", b"appendonly"])
+        .expect(b"*2\r\n$10\r\nappendonly\r\n$3\r\nyes\r\n");
+    c.cmd(&[b"CONFIG", b"GET", b"appenddirname"])
+        .expect(b"*2\r\n$13\r\nappenddirname\r\n$5\r\nmydir\r\n");
+    c.cmd(&[b"CONFIG", b"GET", b"appendfilename"])
+        .expect(b"*2\r\n$14\r\nappendfilename\r\n$6\r\nmy.aof\r\n");
+    c.cmd(&[b"CONFIG", b"GET", b"appendfsync"])
+        .expect(b"*2\r\n$11\r\nappendfsync\r\n$6\r\nalways\r\n");
+}
+
+
+#[test]
+fn creates_appendonly_dir_when_enabled() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-dir");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+    ]);
+    assert!(dir.join("appendonlydir").is_dir());
+}
+
+#[test]
+fn does_not_create_appendonly_dir_when_disabled() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-dir-off");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "no",
+        "--appenddirname", "appendonlydir",
+    ]);
+    assert!(!dir.join("appendonlydir").exists());
+}

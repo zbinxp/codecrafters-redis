@@ -26,6 +26,10 @@ pub struct Config {
     pub replicaof: Option<(String, u16)>,
     pub dir: Option<String>,
     pub dbfilename: Option<String>,
+    pub appendonly: Option<String>,
+    pub appenddirname: Option<String>,
+    pub appendfilename: Option<String>,
+    pub appendfsync: Option<String>,
 }
 
 
@@ -34,12 +38,29 @@ pub async fn run(config: Config) {
         Some((h, p)) => Role::Replica { host: h.clone(), port:*p },
         None => Role::Master
     };
-    let dir = config.dir.clone().unwrap_or_else(||".".to_string());
-    let dbfilename = config.dbfilename.clone().unwrap_or_else(||"dump.rdb".to_string());
     let mut store = Store::new(role, config.dir, config.dbfilename);
-    let path = format!("{}/{}", dir, dbfilename);
+    if let Some(v) = config.appendonly {
+        store.appendonly = v;
+    }
+    if let Some(v) = config.appenddirname {
+        store.appenddirname = v;
+    }
+    if let Some(v) = config.appendfilename {
+        store.appendfilename = v;
+    }
+    if let Some(v) = config.appendfsync {
+        store.appendfsync = v;
+    }
+    let path = format!("{}/{}", store.dir, store.dbfilename);
     if let Ok(bytes) = std::fs::read(&path) {
         rdb::load(&bytes, &mut store);
+    }
+
+    if store.appendonly.eq_ignore_ascii_case("yes") {
+        let aof_dir = format!("{}/{}", store.dir, store.appenddirname);
+        if let Err(e) = std::fs::create_dir_all(&aof_dir) {
+            eprintln!("failed to create AOF directory {aof_dir}: {e}");
+        }
     }
 
     let store = Arc::new(Mutex::new(store));
