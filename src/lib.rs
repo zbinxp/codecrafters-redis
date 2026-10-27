@@ -9,7 +9,7 @@ mod dispatch;
 mod replica;
 mod rdb;
 
-use std::sync::{Arc, Mutex};
+use std::{fs, sync::{Arc, Mutex}};
 
 use bytes::BytesMut;
 use tokio::{
@@ -61,13 +61,26 @@ pub async fn run(config: Config) {
         if let Err(e) = std::fs::create_dir_all(&aof_dir) {
             eprintln!("failed to create AOF directory {aof_dir}: {e}");
         }
-        let aof_path = format!("{}/{}.1.incr.aof", aof_dir, store.appendfilename);
-        if let Err(e) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&aof_path)
-        {
-            eprintln!("failed to create AOF file {aof_path}: {e}");
+        let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
+        // read active aof name
+        let incr_name = match fs::read_to_string(&manifest_path) {
+            Ok(text) => active_incr_file(&text).unwrap_or_else(|| {
+                format!("{}.1.incr.aof", store.appendfilename)
+            }),
+            Err(_) => {
+                let name = format!("{}.1.incr.aof", store.appendfilename);
+                let path = format!("{}/{}", aof_dir, name);
+                let _ = fs::OpenOptions::new().create(true).append(true).open(&path);
+                let _ = fs::write(&manifest_path, format!("file {} seq 1 type i\n", name));
+                name
+            }
+        };
+
+
+        let aof_path = format!("{}/{}", aof_dir, incr_name);
+        match fs::OpenOptions::new().create(true).append(true).open(&aof_path) {
+            Ok(f) => store.aof = Some(f),
+            Err(e) => eprintln!("failed to open AOF file {aof_path}: {e}"),
         }
     }
 
@@ -107,4 +120,14 @@ pub async fn run(config: Config) {
             }
         });
     }
+}
+
+fn active_incr_file(manifest: &str) -> Option<String> {
+    for line in manifest.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() >=6 && t[0] == "file" && t[4] == "type" && t[5] == "i" {
+            return Some(t[1].to_string())
+        }
+    }
+    None
 }

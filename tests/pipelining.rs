@@ -3471,6 +3471,20 @@ fn free_addr() -> String {
         .to_string()
 }
 
+/// Create `<root>/appendonlydir` with a manifest pointing at `incr_name`, plus
+/// the empty incr file. Returns the appendonlydir path.
+fn setup_aof_dir(root: &std::path::Path, incr_name: &str) -> std::path::PathBuf {
+    let aof_dir = root.join("appendonlydir");
+    std::fs::create_dir_all(&aof_dir).unwrap();
+    std::fs::write(
+        aof_dir.join("appendonly.aof.manifest"),
+        format!("file {} seq 1 type i\n", incr_name),
+    )
+    .unwrap();
+    std::fs::write(aof_dir.join(incr_name), b"").unwrap();
+    aof_dir
+}
+
 #[test]
 fn config_get_returns_dir_and_dbfilename() {
     let _guard = lock_server();
@@ -3643,4 +3657,107 @@ fn creates_appendonly_file_when_enabled() {
     let path = dir.join("appendonlydir").join("appendonly.aof.1.incr.aof");
     assert!(path.is_file(), "AOF file was not created: {path:?}");
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}
+
+#[test]
+fn creates_manifest_file_when_enabled() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-manifest");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let manifest = dir.join("appendonlydir").join("appendonly.aof.manifest");
+    assert!(manifest.is_file(), "manifest not created: {manifest:?}");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        "file appendonly.aof.1.incr.aof seq 1 type i\n"
+    );
+}
+
+#[test]
+fn appends_write_command_to_manifest_file() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-write");
+    let aof_dir = dir.join("appendonlydir");
+    std::fs::create_dir_all(&aof_dir).unwrap();
+    // 预置 manifest，指向一个非默认文件名
+    std::fs::write(aof_dir.join("appendonly.aof.manifest"),
+        "file random.1.incr.aof seq 1 type i\n").unwrap();
+    std::fs::write(aof_dir.join("random.1.incr.aof"), b"").unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(got, b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n100\r\n");
+}
+
+/// fi1: every write command is appended, in the order received.
+#[test]
+fn appends_multiple_commands_in_order() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-multi");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"100"]).expect(b"+OK\r\n");
+    c.cmd(&[b"SET", b"bar", b"200"]).expect(b"+OK\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n100\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$3\r\n200\r\n"
+    );
+}
+
+/// ep6: non-write commands (GET/PING/ECHO/CONFIG GET) never reach the AOF.
+#[test]
+fn aof_contains_only_write_commands() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-filter");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"1"]).expect(b"+OK\r\n");
+    c.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n1\r\n");
+    c.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+    c.cmd(&[b"ECHO", b"hello"]).expect(b"$5\r\nhello\r\n");
+    c.cmd(&[b"CONFIG", b"GET", b"appendonly"]).expect(b"*2\r\n$10\r\nappendonly\r\n$3\r\nyes\r\n");
+    c.cmd(&[b"SET", b"bar", b"2"]).expect(b"+OK\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+    );
 }

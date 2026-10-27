@@ -1,3 +1,5 @@
+use bytes::BytesMut;
+
 use crate::client::Conn;
 use crate::commands::{
     CmdResult, cmd_config, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_keys, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
@@ -113,6 +115,19 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
             // send request to replicas
             if is_write_command(name) {
                 let cmd = Frame::Array(args.to_vec());
+
+                // --- AOF ---
+                if let Some(aof) = store.aof.as_mut() {
+                    let mut buf = BytesMut::new();
+                    cmd.encode(&mut buf);
+                    if let Err(e) = std::io::Write::write_all(aof, &buf) {
+                        eprintln!("AOF write failed: {e}");
+                    } else if store.appendfsync.eq_ignore_ascii_case("always") {
+                        let _ = aof.sync_all();
+                    }
+                }
+
+                // --- replica broadcast ---
                 store.master_repl_offset += cmd.frame_len() as u64;
                 for out in store.replicas.values() {
                     let _ = out.send(cmd.clone());

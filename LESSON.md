@@ -434,7 +434,69 @@ EXEC/DISCARD 后都清 watched。
 
 ---
 
-## 8. 一句话原则
+## 8. 持久化：RDB 读 & AOF（2026-10 追加）
+
+### 8.1 RDB：这个挑战只考「读」
+
+RDB 组（#69–74）全是加载：启动时读 `{dir}/{dbfilename}` 到内存。**没有写 RDB / SAVE /
+BGSAVE 的 stage**；复制握手用的 RDB 可以硬编码为空。
+
+RDB 结构（按顺序）：
+1. 头部 `"REDIS0011"`（9 字节）。
+2. metadata：`0xFA` + 名字 string + 值 string。
+3. database：`0xFE` + db index（size 编码）；`0xFB` + 两个 size（key 数、带过期 key 数）；
+   随后是 key-value。
+4. 每个 key-value：可选过期（`0xFD` + 4 字节 LE 秒 / `0xFC` + 8 字节 LE 毫秒）→ 类型字节
+   （`0x00`=string）→ key（string）→ value。
+5. `0xFF` + 8 字节 CRC64（可忽略）。
+
+编码：
+- **size 编码**：首字节高 2 位 `00` → 低 6 位；`01` → 14 位**大端**；`10` → 后 4 字节
+  **大端**；`11` → string 特殊编码。
+- **string 编码**：size 编码的长度 + 原始字节；`0xC0/0xC1/0xC2` → int8/int16/int32
+  （**小端**），要转成十进制 ASCII 存成字符串；`0xC3` 是 LZF，挑战不出现。
+- **坑**：size/容器长度是**大端**，过期时间戳和整数内容是**小端**，别搞混。
+
+过期：RDB 里是**绝对 Unix 时间戳**，而 `Entry.expires_at` 是 `Instant`。加载时换算剩余毫秒；
+已过期的 key 直接丢弃（GET → `$-1`，KEYS 也不列出）。
+
+解析要防御式：`take` 用 `.get(pos..end)?` 而不是切片索引（越界 panic 会让服务器**启动即崩**）；
+每个 opcode 后面该消费多少字节必须严格对齐，否则整条流错位。
+
+### 8.2 AOF：Multi-Part AOF 与 manifest
+
+配置默认值：`appendonly=no`、`appenddirname=appendonlydir`、`appendfilename=appendonly.aof`、
+`appendfsync=everysec`，`dir` 默认启动时的 cwd（绝对路径）。
+
+Redis 7 的 AOF 不是单个文件，而是多段：
+- **base**（`type b`）：上次 rewrite 的快照（通常是 RDB 格式）。
+- **incr**（`type i`）：快照之后追加的写命令（`<appendfilename>.<seq>.incr.aof`）。
+
+`<appendfilename>.manifest` 是**索引**：列出有哪些 AOF 文件、顺序（`seq`）和类型（`b`/`i`），例如：
+
+```
+file appendonly.aof.1.base.rdb seq 1 type b
+file appendonly.aof.1.incr.aof seq 1 type i
+```
+
+用途：
+1. **启动恢复**：先加载 base，再按 seq 顺序 replay 各个 incr 文件。
+2. **原子切换**：rewrite 时先写新文件，再「临时 manifest → rename」成正式 manifest；rename 原子，
+   保证任何时刻 manifest 指向一组完整一致的文件（crash-safe）。
+3. **识别陈旧文件**：manifest 未列出的 `.incr.aof` / `.base.rdb` 是旧的/孤儿，可清理。
+
+挑战里的简化版：只有一行（`.1.incr.aof seq 1 type i`），没有 base、没有 rewrite、没有真正的
+rename。创建时机必须在**绑定端口之前**（`Server::start_on` 返回时文件已存在），顺序：
+
+```
+create_dir_all(appenddir)
+→ 创建空 incr 文件（OpenOptions::new().create(true).append(true)，不截断，为以后 replay 保留内容）
+→ fs::write manifest（单空格分隔、结尾换行）
+```
+
+---
+
+## 9. 一句话原则
 
 1. **不确定就问/查官方 spec**，别凭直觉（`codecrafters task -stage`）。
 2. **改代码前后都跑测试**，并且让新测试在旧实现上先红。

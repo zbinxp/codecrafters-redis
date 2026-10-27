@@ -52,6 +52,7 @@ pub(crate) struct Db {
     pub appenddirname: String, // appendonlydir
     pub appendfilename: String, // appendonly.aof
     pub appendfsync: String, // everysec
+    pub aof: Option<std::fs::File>,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
@@ -78,7 +79,8 @@ impl Db {
             appendonly: "no".to_string(),
             appenddirname: "appendonlydir".to_string(),
             appendfilename: "appendonly.aof".to_string(),
-            appendfsync: "everysec".to_string()
+            appendfsync: "everysec".to_string(),
+            aof: None,
         }
     }
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {
