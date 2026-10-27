@@ -83,6 +83,7 @@ impl Db {
             aof: None,
         }
     }
+    
     pub fn live_entry(&mut self, key: &[u8]) -> Option<& mut Entry> {
         if self
             .data

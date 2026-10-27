@@ -39,9 +39,32 @@
 - 与现有 `PX` 共存；`PX` 仍相对。
 
 **Changes**
-- `commands/string.rs::parse_set`：把「选项 + 值」解析成 `expires_at: Option<Instant>`；
-  `PXAT` → `Instant::now() + (target_ms - now_ms)`；`EXAT` 同理 ×1000。
-- 已过期时可直接不写入（或写入一个过去的 `expires_at`，由 `live_entry` 惰性删）。
+- `commands/string.rs::parse_set`：把「选项 + 值」解析成 `expires_at: Option<Instant>`。
+
+**关键：Unix 时间戳不能直接变成 `Instant`**
+
+`Instant` 是单调时钟，和 Unix epoch 无关，**没有**从时间戳构造的 API。正确做法是
+「先拿当前 Unix 时间，算剩余时长，再加到 `Instant::now()` 上」：
+
+```rust
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// 绝对 Unix 毫秒 -> Instant 截止点；已经过去则返回 None。
+fn unix_ms_to_instant(target_ms: u64) -> Option<Instant> {
+    let now = now_ms();
+    if target_ms <= now { return None; }
+    Instant::now().checked_add(Duration::from_millis(target_ms - now))
+}
+```
+
+`PXAT <unix-ms>` 直接用；`EXAT <unix-s>` 先 `*1000`。已经过期（`None`）时，为了**覆盖旧值**，
+应插入一个「立刻过期」的 entry（`expires_at: Some(Instant::now())`），这样 `live_entry`
+下次访问会删掉它；不要直接跳过插入，否则旧值会残留。
 
 **Tests**
 - `SET k v PXAT <future>` → `GET` 得值；`PXAT <past>` → `$-1`。

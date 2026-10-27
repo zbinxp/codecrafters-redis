@@ -14,8 +14,8 @@ pub enum Frame {
     Int(i64),          // :42\r\n
     Array(Vec<Frame>),     // *2\r\n$4\r\nECHO\r\n$5\r\nHello\r\n
     Err(String),           // -ERR msg\r\n
-    Null,
-    NullArray,
+    Null,                  // $-1\r\n
+    NullArray,             // *-1\r\n 
     Rdb(Vec<u8>),
 }
 

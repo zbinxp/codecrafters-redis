@@ -3817,3 +3817,69 @@ fn replays_multiple_aof_commands_without_duplicating() {
     expected.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$3\r\nnew\r\n$1\r\n1\r\n");
     assert_eq!(std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap(), expected);
 }
+
+// ---------------------------------------------------------------------------
+// ar1: SET with absolute expiry (PXAT / EXAT)
+// ---------------------------------------------------------------------------
+
+/// 2100-01-01T00:00:00Z, far enough in the future to never expire in a test.
+const FAR_FUTURE_MS: &[u8] = b"4102444800000";
+const FAR_FUTURE_S: &[u8] = b"4102444800";
+
+#[test]
+fn set_pxat_future_keeps_value() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PXAT", FAR_FUTURE_MS])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$1\r\nv\r\n");
+}
+
+/// An absolute timestamp in the past must overwrite the old value and leave the
+/// key expired (not permanent).
+#[test]
+fn set_pxat_past_expires_immediately_and_overwrites() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"old"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SET", b"k", b"new", b"PXAT", b"1"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}
+
+#[test]
+fn set_exat_future_keeps_value() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"EXAT", FAR_FUTURE_S])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$1\r\nv\r\n");
+}
+
+#[test]
+fn set_exat_past_expires_immediately() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"EXAT", b"1"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}
+
+#[test]
+fn set_pxat_non_integer_is_an_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PXAT", b"abc"])
+        .expect_prefix(b"-ERR");
+    // The connection stays usable after the error.
+    t.client.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+}
+
+/// An unknown expiry option must be rejected, not treated as a plain SET.
+#[test]
+fn set_with_unknown_expiry_option_is_a_syntax_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"FOO", b"1"])
+        .expect(b"-ERR syntax error\r\n");
+}

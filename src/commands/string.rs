@@ -58,14 +58,20 @@ fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), RedisErr
     let value = bulk_at(args, 2).ok_or_else(|| RedisError::wrong_args("set"))?;
     let expires_at = match (args.get(3), args.get(4)) {
         (None, _) => None,
-        (Some(Frame::BulkString(opt)), Some(Frame::BulkString(ms)))
-            if opt.eq_ignore_ascii_case(b"PX") =>
+        (Some(Frame::BulkString(opt)), Some(Frame::BulkString(ms))) =>
         {
-            let Some(ms) = util::parse(ms) else {
-                return Err(RedisError::invalid_expire());
-            };
-            Instant::now().checked_add(Duration::from_millis(ms))
-        }
+            let ms = util::parse(ms).ok_or_else(RedisError::invalid_expire)?;
+            if opt.eq_ignore_ascii_case(b"PX") {
+                Some(Instant::now().checked_add(Duration::from_millis(ms)).unwrap_or_else(Instant::now))
+            } else if opt.eq_ignore_ascii_case(b"PXAT") {
+                Some(util::unix_ms_to_instant(ms).unwrap_or_else(Instant::now))
+            } else if opt.eq_ignore_ascii_case(b"EXAT") {
+                let ms = ms.checked_mul(1000).ok_or_else(||RedisError::syntax_error())?;
+                Some(util::unix_ms_to_instant(ms).unwrap_or_else(Instant::now))
+            } else {
+                return Err(RedisError::syntax_error())
+            }
+        },
         _ => return Err(RedisError::syntax_error()),
     };
 
