@@ -21,6 +21,8 @@ use resp::{Frame};
 use db::{Store, Role};
 use connection::StreamHandler;
 
+use crate::{client::Conn, dispatch::execute, resp::Decoder};
+
 pub struct Config {
     pub port: u16,
     pub replicaof: Option<(String, u16)>,
@@ -78,6 +80,11 @@ pub async fn run(config: Config) {
 
 
         let aof_path = format!("{}/{}", aof_dir, incr_name);
+        // replay existing aof
+        if let Ok(bytes) = fs::read(&aof_path) {
+            replay_aof(&bytes, &mut store);
+        }
+
         match fs::OpenOptions::new().create(true).append(true).open(&aof_path) {
             Ok(f) => store.aof = Some(f),
             Err(e) => eprintln!("failed to open AOF file {aof_path}: {e}"),
@@ -130,4 +137,16 @@ fn active_incr_file(manifest: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn replay_aof(bytes: &[u8], store: &mut Store) {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut conn = Conn::new(0, tx);
+    conn.from_master = true;
+    conn.replaying = true;
+    let mut decoder = Decoder::new();
+    decoder.extend(bytes);
+    while let Some(frame) = decoder.parse() {
+        let _ = execute(&frame, &mut conn, store);
+    }
 }

@@ -43,7 +43,7 @@ pub(crate) struct Db {
     pub channel_subscribers: HashMap<Vec<u8>, HashMap<u64, Outbox>>,
     pub role: Role,
     pub master_replid: String,
-    pub master_repl_offset: u64,
+    pub master_repl_offset: u64,  // replicated offset on master
     pub replicas: HashMap<u64, Outbox>,
     pub replic_acks: HashMap<u64, u64>,
     pub dir: String, // def: .

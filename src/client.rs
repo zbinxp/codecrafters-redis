@@ -19,7 +19,8 @@ pub struct Conn {
     pub multi: Option<Vec<Frame>>,
     // save keys in watch mode
     pub watched: HashMap<Vec<u8>, u64>,
-    pub from_master: bool
+    pub from_master: bool,
+    pub replaying: bool
 }
 
 impl Conn {
@@ -30,7 +31,8 @@ impl Conn {
             out_tx,
             multi : None,
             watched: HashMap::new(),
-            from_master: false
+            from_master: false,
+            replaying: false,
         }
     }
 }

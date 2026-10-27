@@ -3761,3 +3761,59 @@ fn aof_contains_only_write_commands() {
         b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
     );
 }
+
+#[test]
+fn replays_aof_on_startup() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-replay");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    std::fs::write(
+        aof_dir.join("random.1.incr.aof"),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    ).unwrap();
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+}
+
+/// kn2: several commands are replayed in order, replaying does not append them
+/// again, and later writes append after the replayed bytes.
+#[test]
+fn replays_multiple_aof_commands_without_duplicating() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-replay-multi");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let initial = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n*3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$3\r\nqux\r\n";
+    std::fs::write(aof_dir.join("random.1.incr.aof"), initial).unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+    c.cmd(&[b"GET", b"baz"]).expect(b"$3\r\nqux\r\n");
+
+    // Replaying must not re-append the commands to the AOF.
+    assert_eq!(std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap(), initial);
+
+    // A later write is appended after the replayed commands.
+    c.cmd(&[b"SET", b"new", b"1"]).expect(b"+OK\r\n");
+    let mut expected = initial.to_vec();
+    expected.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$3\r\nnew\r\n$1\r\n1\r\n");
+    assert_eq!(std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap(), expected);
+}

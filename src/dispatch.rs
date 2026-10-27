@@ -116,7 +116,7 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
             if is_write_command(name) {
                 let cmd = Frame::Array(args.to_vec());
 
-                // --- AOF ---
+                // --- AOF generate aof for write command ---
                 if let Some(aof) = store.aof.as_mut() {
                     let mut buf = BytesMut::new();
                     cmd.encode(&mut buf);
@@ -128,9 +128,11 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
                 }
 
                 // --- replica broadcast ---
-                store.master_repl_offset += cmd.frame_len() as u64;
-                for out in store.replicas.values() {
-                    let _ = out.send(cmd.clone());
+                if !conn.replaying {
+                    store.master_repl_offset += cmd.frame_len() as u64;
+                    for out in store.replicas.values() {
+                        let _ = out.send(cmd.clone());
+                    }
                 }
             }
             Ok(result)
