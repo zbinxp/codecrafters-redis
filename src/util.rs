@@ -19,3 +19,9 @@ pub fn unix_ms_to_instant(target_ms: u64) -> Option<Instant> {
     }
     Instant::now().checked_add(Duration::from_millis(target_ms - now))
 }
+
+pub fn instant_to_unix_ms(inst: Instant) -> u64 {
+    let now = now_ms();
+    let ms = inst.duration_since(Instant::now()).as_millis() as u64;
+    now.checked_add(ms).unwrap_or(0) 
+}

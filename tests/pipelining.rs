@@ -3471,6 +3471,13 @@ fn free_addr() -> String {
         .to_string()
 }
 
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 /// Create `<root>/appendonlydir` with a manifest pointing at `incr_name`, plus
 /// the empty incr file. Returns the appendonlydir path.
 fn setup_aof_dir(root: &std::path::Path, incr_name: &str) -> std::path::PathBuf {
@@ -3989,4 +3996,54 @@ file appendonly.aof.1.incr.aof seq 1 type i\n";
     let mut c = Client::connect_to(&addr);
     c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n"); // from the RDB base
     c.cmd(&[b"GET", b"baz"]).expect(b"$3\r\nqux\r\n"); // from the incr
+}
+
+// ---------------------------------------------------------------------------
+// PEXPIREAT (introduced with ar4 for non-string TTLs)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pexpireat_sets_absolute_ttl() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    let future = (unix_ms() + 60_000).to_string();
+    t.client
+        .cmd(&[b"PEXPIREAT", b"k", future.as_bytes()])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$1\r\nv\r\n");
+}
+
+#[test]
+fn pexpireat_missing_key_returns_zero() {
+    let mut t = TestCtx::new();
+    let future = (unix_ms() + 60_000).to_string();
+    t.client
+        .cmd(&[b"PEXPIREAT", b"nope", future.as_bytes()])
+        .expect(b":0\r\n");
+}
+
+/// A past timestamp must expire the key, not clear its TTL / make it permanent.
+#[test]
+fn pexpireat_in_the_past_expires_the_key() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"PEXPIREAT", b"k", b"1"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}
+
+/// An already-expired key is logically absent: PEXPIREAT must not revive it.
+#[test]
+fn pexpireat_does_not_resurrect_expired_key() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"v", b"PX", b"50"])
+        .expect(b"+OK\r\n");
+    sleep(Duration::from_millis(120));
+    let future = (unix_ms() + 60_000).to_string();
+    t.client
+        .cmd(&[b"PEXPIREAT", b"k", future.as_bytes()])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
 }

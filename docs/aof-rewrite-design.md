@@ -138,16 +138,24 @@ fn unix_ms_to_instant(target_ms: u64) -> Option<Instant> {
 | `ZSet(t)` | 每个成员一条 `ZADD key <score> <member>`（当前 `cmd_zadd` 只收单成员） |
 | `Stream(s)` | 每个 entry 一条 `XADD key <id> f v ...`（**显式 id**） |
 
-- 跳过过期 key；TTL 仍用 `PXAT`（对 `RPUSH`/`ZADD`/`XADD` 同样适用）。
+- 跳过过期 key。
+- **TTL 不能都用 `PXAT`**：
+  - `Value::String` → `SET key value PXAT <abs-ms>`（`PXAT` 是 `SET` 的选项）。
+  - `List` / `ZSet` / `Stream` → 先输出类型命令，再单独发一条
+    `PEXPIREAT <key> <abs-ms>`。`PXAT` **不能**跟在 `RPUSH`/`ZADD`/`XADD` 后面（那是非法命令）。
+  - 所以 `PEXPIREAT key <ms>`（以及可选的 `EXPIREAT key <s>`）需要先作为普通命令实现；
+    否则集合类型的 TTL 会在 rewrite/重启后丢失。
 
 **Changes**
 - `aof.rs` 增加各类型的 `serialize_*`。
+- 新增命令 `PEXPIREAT key <unix-ms>`（设置绝对过期时间；key 不存在返回 `:0`）。
 - 注意 score 的格式化：`Score(f64).0.to_string()`。
 
 **Tests**
 - round-trip：构造含四种类型的 `Store` → `serialize_dataset` → replay 到空 `Store`
   → 逐 key 比较（类型 + 值 + 顺序 + score）。
 - 空 list/zset/stream 不输出（或输出合法空命令）。
+- 带 TTL 的 list：输出 `RPUSH` + `PEXPIREAT` 两条，且时间是绝对时间。
 
 **Pitfall**：ZSet 的 `BTreeSet` 顺序是 score+member，replay 用单条 `ZADD` 不会改变集合语义；
 Stream 必须显式 id，`*` 会导致重放时生成新 id。

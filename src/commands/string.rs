@@ -29,6 +29,7 @@ pub fn cmd_set(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult
     Ok(vec![Frame::SimpleString(b"OK".to_vec())])
 }
 
+/// INCR key
 pub fn cmd_incr(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
     if args.len() > 2 {
         return Err(RedisError::wrong_args("incr"))
@@ -47,6 +48,24 @@ pub fn cmd_incr(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
     *v = res.to_string().into_bytes();
     store.touch(key);
     Ok(vec![Frame::Int(res)])
+}
+
+/// PEXPIREAT key unix_ms
+pub fn cmd_pexpireat(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 3 {
+        return Err(RedisError::wrong_args("pexpireat"))
+    }
+    let key = bulk_at(args, 1).ok_or_else(|| RedisError::wrong_args("pexpireat"))?;
+    let unix_ms = bulk_at(args, 2).and_then(|bytes| util::parse::<u64>(bytes))
+        .ok_or_else(|| RedisError::invalid_expire())?;
+
+    let Some(entry) = store.live_entry(key) else {
+        return Ok(vec![Frame::Int(0)])
+    };
+    // none means outdated
+    entry.expires_at = Some(util::unix_ms_to_instant(unix_ms).unwrap_or_else(Instant::now));
+    store.touch(key);
+    Ok(vec![Frame::Int(1)])
 }
 
 // SET <key> <value> [PX <milliseconds>]

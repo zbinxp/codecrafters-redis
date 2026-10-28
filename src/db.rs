@@ -97,6 +97,18 @@ impl Db {
         self.data.get_mut(key)
     }
 
+    pub fn readonly_entry(&self, key: &[u8]) -> Option<&Entry> {
+        if self
+            .data
+            .get(key)
+            .and_then(|e| e.expires_at)
+            .is_some_and(|t| t <= Instant::now()) {
+            None
+        } else {
+            self.data.get(key)
+        }
+    }
+
     /// mark that this operation causes version bump
     pub fn touch(&mut self, key: &[u8]) {
         self.version_seq += 1;

@@ -2,7 +2,7 @@ use bytes::BytesMut;
 
 use crate::client::Conn;
 use crate::commands::{
-    CmdResult, cmd_config, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_keys, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
+    CmdResult, cmd_config, cmd_discard, cmd_echo, cmd_exec, cmd_get, cmd_incr, cmd_info, cmd_keys, cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_pexpireat, cmd_ping, cmd_psync, cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe, cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange, cmd_zrank, cmd_zrem, cmd_zscore,
 };
 use crate::db::{Store, Role};
 use crate::error::RedisError;
@@ -49,6 +49,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"PSYNC" => Some(cmd_psync),
         b"CONFIG" => Some(cmd_config),
         b"KEYS" => Some(cmd_keys),
+        b"PEXPIREAT" => Some(cmd_pexpireat),
         _ => None,
     }
 }
@@ -155,6 +156,6 @@ fn is_transaction_control(name: &[u8]) -> bool {
 
 fn is_write_command(name: &[u8]) -> bool {
     [b"SET".as_slice(), b"INCR", b"RPUSH", b"LPUSH", b"LPOP",
-    b"ZADD", b"ZREM", b"XADD"]
+    b"ZADD", b"ZREM", b"XADD", b"PEXPIREAT"]
         .iter().any(|c| name.eq_ignore_ascii_case(c))
 }
