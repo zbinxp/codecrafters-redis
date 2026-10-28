@@ -8,6 +8,7 @@ mod error;
 mod dispatch;
 mod replica;
 mod rdb;
+mod aof;
 
 use std::{fs, sync::{Arc, Mutex}};
 
@@ -65,30 +66,38 @@ pub async fn run(config: Config) {
         }
         let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
         // read active aof name
-        let incr_name = match fs::read_to_string(&manifest_path) {
-            Ok(text) => active_incr_file(&text).unwrap_or_else(|| {
-                format!("{}.1.incr.aof", store.appendfilename)
+        let names = match fs::read_to_string(&manifest_path) {
+            Ok(text) => aof::parse_manifest(&text).unwrap_or_else(|| {
+                vec![format!("{}.1.incr.aof", store.appendfilename)]
             }),
             Err(_) => {
                 let name = format!("{}.1.incr.aof", store.appendfilename);
                 let path = format!("{}/{}", aof_dir, name);
                 let _ = fs::OpenOptions::new().create(true).append(true).open(&path);
                 let _ = fs::write(&manifest_path, format!("file {} seq 1 type i\n", name));
-                name
+                vec![name]
             }
         };
 
-
-        let aof_path = format!("{}/{}", aof_dir, incr_name);
         // replay existing aof
-        if let Ok(bytes) = fs::read(&aof_path) {
-            replay_aof(&bytes, &mut store);
+        for incr_name in names.iter() {
+            let path = format!("{}/{}", aof_dir, incr_name);
+            if let Ok(bytes) = fs::read(&path) {
+                if incr_name.ends_with(".rdb") {
+                    rdb::load(&bytes, &mut store);
+                } else {
+                    replay_aof(&bytes, &mut store);
+                }
+            }
         }
 
-        match fs::OpenOptions::new().create(true).append(true).open(&aof_path) {
-            Ok(f) => store.aof = Some(f),
-            Err(e) => eprintln!("failed to open AOF file {aof_path}: {e}"),
-        }
+        names.last().into_iter().for_each(|incr_name| {
+            let aof_path = format!("{}/{}", aof_dir, incr_name);
+            match fs::OpenOptions::new().create(true).append(true).open(&aof_path) {
+                Ok(f) => store.aof = Some(f),
+                Err(e) => eprintln!("failed to open AOF file {aof_path}: {e}"),
+            }
+        });
     }
 
     let store = Arc::new(Mutex::new(store));
@@ -127,16 +136,6 @@ pub async fn run(config: Config) {
             }
         });
     }
-}
-
-fn active_incr_file(manifest: &str) -> Option<String> {
-    for line in manifest.lines() {
-        let t: Vec<&str> = line.split_whitespace().collect();
-        if t.len() >=6 && t[0] == "file" && t[4] == "type" && t[5] == "i" {
-            return Some(t[1].to_string())
-        }
-    }
-    None
 }
 
 fn replay_aof(bytes: &[u8], store: &mut Store) {

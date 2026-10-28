@@ -11,3 +11,7 @@ target/
 
 # Firecrawl scratch/cache
 .firecrawl/
+
+# Local AOF/RDB artifacts from manual runs
+appendonlydir/
+*.aof

@@ -3485,6 +3485,21 @@ fn setup_aof_dir(root: &std::path::Path, incr_name: &str) -> std::path::PathBuf 
     aof_dir
 }
 
+/// Create `<root>/appendonlydir` with an arbitrary manifest and file set.
+fn setup_aof_dir_manifest(
+    root: &std::path::Path,
+    manifest: &str,
+    files: &[(&str, &[u8])],
+) -> std::path::PathBuf {
+    let aof_dir = root.join("appendonlydir");
+    std::fs::create_dir_all(&aof_dir).unwrap();
+    std::fs::write(aof_dir.join("appendonly.aof.manifest"), manifest).unwrap();
+    for (name, bytes) in files {
+        std::fs::write(aof_dir.join(name), *bytes).unwrap();
+    }
+    aof_dir
+}
+
 #[test]
 fn config_get_returns_dir_and_dbfilename() {
     let _guard = lock_server();
@@ -3882,4 +3897,96 @@ fn set_with_unknown_expiry_option_is_a_syntax_error() {
     t.client
         .cmd(&[b"SET", b"k", b"v", b"FOO", b"1"])
         .expect(b"-ERR syntax error\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// ar2: manifest as a list, load base first then incrs by seq
+// ---------------------------------------------------------------------------
+
+/// ar2: a `type b` base file is replayed before the `type i` incr file, so the
+/// incr wins on overlap and base-only keys survive.
+#[test]
+fn aof_loads_base_before_incr() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-ar2-base-incr");
+    let manifest = "\
+file base.1.base.aof seq 1 type b\n\
+file incr.1.incr.aof seq 1 type i\n";
+    let base = b"*3\r\n$3\r\nSET\r\n$5\r\nbasek\r\n$4\r\nbase\r\n\
+                 *3\r\n$3\r\nSET\r\n$4\r\nsame\r\n$4\r\nbase\r\n";
+    let incr = b"*3\r\n$3\r\nSET\r\n$4\r\nsame\r\n$4\r\nincr\r\n";
+    setup_aof_dir_manifest(&dir, manifest, &[
+        ("base.1.base.aof", base),
+        ("incr.1.incr.aof", incr),
+    ]);
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"basek"]).expect(b"$4\r\nbase\r\n");
+    c.cmd(&[b"GET", b"same"]).expect(b"$4\r\nincr\r\n");
+}
+
+/// ar2: all `type i` files are replayed in seq order (not manifest line order).
+#[test]
+fn aof_replays_all_incrs_in_seq_order() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-ar2-incr-order");
+    // Manifest lines are deliberately out of seq order.
+    let manifest = "\
+file x.2.incr.aof seq 2 type i\n\
+file x.1.incr.aof seq 1 type i\n";
+    let x1 = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n\
+                *3\r\n$3\r\nSET\r\n$5\r\nonly1\r\n$3\r\nyes\r\n";
+    let x2 = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n2\r\n";
+    setup_aof_dir_manifest(&dir, manifest, &[
+        ("x.1.incr.aof", x1),
+        ("x.2.incr.aof", x2),
+    ]);
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"a"]).expect(b"$1\r\n2\r\n");       // seq 2 wins
+    c.cmd(&[b"GET", b"only1"]).expect(b"$3\r\nyes\r\n");  // seq 1 still replayed
+}
+
+/// ar2: a `type b` file ending in `.rdb` is loaded with the RDB parser.
+#[test]
+fn aof_loads_rdb_base() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-ar2-rdb-base");
+    let manifest = "\
+file appendonly.aof.1.base.rdb seq 1 type b\n\
+file appendonly.aof.1.incr.aof seq 1 type i\n";
+    let incr = b"*3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$3\r\nqux\r\n";
+    setup_aof_dir_manifest(&dir, manifest, &[
+        ("appendonly.aof.1.base.rdb", ONE_KEY_RDB),
+        ("appendonly.aof.1.incr.aof", incr),
+    ]);
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--dbfilename", "does-not-exist.rdb",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n"); // from the RDB base
+    c.cmd(&[b"GET", b"baz"]).expect(b"$3\r\nqux\r\n"); // from the incr
 }
