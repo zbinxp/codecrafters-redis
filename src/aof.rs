@@ -1,16 +1,108 @@
-use std::time::Instant;
+use std::{collections::HashMap, fs::{self, File}, io::{self, Write}, path::PathBuf, time::Instant};
 
 use bytes::BytesMut;
 
-use crate::{db::{Store, Value}, resp::{Frame}, util};
+use crate::{client::Conn, commands::CmdResult, db::{Entry, Store, Value}, error::RedisError, resp::Frame, util};
 
+/// BGREWRITEAOF
+pub fn cmd_bgrewriteaof(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 1 {
+        return Err(RedisError::wrong_args("bgrewriteaof"));
+    }
 
-/// parse manifest into ordered file list
-/// format:
-/// file appendonly.aof.2.base.aof  seq 2 type b
-/// file appendonly.aof.2.incr.aof seq 2 type i
-pub fn parse_manifest(manifest: &str) -> Option<Vec<String>> {
-    let mut ma = Vec::new();
+    let aof_dir = format!("{}/{}", store.dir, store.appenddirname);
+    let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
+
+    // Files referenced by the previous manifest, plus the next rewrite generation.
+    let content = fs::read_to_string(&manifest_path).unwrap_or_default();
+    let file_names: Vec<String> = parse_manifest_all(&content)
+        .map(|v| v.into_iter().map(|(_, _, name)| name).collect())
+        .unwrap_or_default();
+    let seq = parse_manifest_max_seq(&content).unwrap_or(0) + 1;
+
+    // The base and its incr share the same seq.
+    let incr_name = format!("{}.{}.incr.aof", store.appendfilename, seq);
+    let base_name = format!("{}.{}.base.aof", store.appendfilename, seq);
+
+    // 1. Switch to the new incr *before* taking the snapshot: every write from
+    //    this point on lands in the new incr.
+    let incr_path = format!("{}/{}", aof_dir, incr_name);
+    match fs::OpenOptions::new().create(true).append(true).open(&incr_path) {
+        Ok(f) => store.aof = Some(f),
+        Err(e) => eprintln!("failed to open AOF file {incr_path}: {e}"),
+    }
+
+    // 2. Owned snapshot; no borrow of `store` is held below.
+    let snapshot = store.data.clone();
+
+    // 3. Write the base: tmp -> fsync -> rename.
+    let bytes = serialize_data(&snapshot);
+    let base_tmp = format!("{}/{}.tmp", aof_dir, base_name);
+    let base_path = format!("{}/{}", aof_dir, base_name);
+    match File::create(&base_tmp) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(&bytes) {
+                eprintln!("failed to write base file {base_tmp}: {e}");
+            }
+            if let Err(e) = f.sync_all() {
+                eprintln!("failed to sync base file {base_tmp}: {e}");
+            }
+        }
+        Err(e) => eprintln!("failed to create base file {base_tmp}: {e}"),
+    }
+    if let Err(e) = fs::rename(&base_tmp, &base_path) {
+        eprintln!("failed to rename base file: {e}");
+    }
+
+    // 4. Atomically switch the manifest (temp -> fsync -> rename).
+    let manifest_ok = match atomic_write_manifest(&aof_dir, &manifest_path, &base_name, &incr_name, seq) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("failed to write manifest {manifest_path}: {e}");
+            false
+        }
+    };
+
+    // 5. Only delete the old files once the manifest points at the new ones;
+    //    otherwise we would leave a manifest referencing missing files.
+    if manifest_ok {
+        for name in &file_names {
+            let path = format!("{}/{}", aof_dir, name);
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("failed to remove old AOF file {path}: {e}");
+            }
+        }
+    }
+
+    Ok(vec![Frame::simple(
+        "Background append only file rewriting started",
+    )])
+}
+
+fn atomic_write_manifest(
+    aof_dir: &str,
+    manifest_path: &str,
+    base_name: &str,
+    incr_name: &str,
+    seq: u64,
+) -> io::Result<()> {
+    let manifest_tmp = PathBuf::from(aof_dir).join("manifest.tmp");
+    let manifest_path = PathBuf::from(manifest_path);
+    {
+        let mut f = File::create(&manifest_tmp)?;
+        let content = format!(
+            "file {} seq {} type b\nfile {} seq {} type i\n",
+            base_name, seq, incr_name, seq
+        );
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(manifest_tmp, manifest_path)?;
+    Ok(())
+}
+
+fn parse_manifest_all(manifest: &str) -> Option<Vec<(String, u64, String)>> {
+    let mut ma: Vec<(&str, u64, &str)> = Vec::new();
     for line in manifest.lines() {
         let t: Vec<&str> = line.trim().split_whitespace().collect();
         if t.len() < 6 || t[0] != "file" {
@@ -29,15 +121,47 @@ pub fn parse_manifest(manifest: &str) -> Option<Vec<String>> {
         if let Some(i) = ma.partition_point(|m|m.0 == "b").checked_sub(1) {
             ma.drain(..i);
         }
-        Some(ma.iter().map(|t|t.2.to_string()).collect())
+        // Own the strings: the caller keeps this vec after `manifest` (and the
+        // `content` String it borrows) is dropped.
+        Some(
+            ma.into_iter()
+                .map(|(kind, seq, name)| (kind.to_string(), seq, name.to_string()))
+                .collect(),
+        )
     }
+}
+
+/// Highest `seq` appearing anywhere in the manifest (None when empty/invalid).
+fn parse_manifest_max_seq(manifest: &str) -> Option<u64> {
+    manifest
+        .lines()
+        .filter_map(|line| {
+            let t: Vec<&str> = line.split_whitespace().collect();
+            if t.len() < 6 || t[0] != "file" {
+                return None;
+            }
+            t[3].parse::<u64>().ok()
+        })
+        .max()
+}
+
+/// parse manifest into ordered file list
+/// format:
+/// file appendonly.aof.2.base.aof  seq 2 type b
+/// file appendonly.aof.2.incr.aof seq 2 type i
+pub fn parse_manifest(manifest: &str) -> Option<Vec<String>> {
+    parse_manifest_all(manifest).map(|v| v.into_iter().map(|(_, _, name)| name).collect())
 }
 
 #[allow(dead_code)]
 pub fn serialize_dataset(store: &Store) -> Vec<u8> {
+    serialize_data(&store.data)
+}
+
+fn serialize_data(data: &HashMap<Vec<u8>, Entry>) -> Vec<u8> {
     let mut buf = BytesMut::new();
-    for (key,_entry) in store.data.iter() {
-        let Some(entry) = store.readonly_entry(key) else {
+    for (key,_entry) in data.iter() {
+        let Some(entry) = Store::readonly_entry(data, key) else {
             continue;
         };
         match &entry.value {

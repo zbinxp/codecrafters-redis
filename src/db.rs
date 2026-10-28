@@ -11,6 +11,7 @@ pub type Outbox = mpsc::UnboundedSender<Frame>;
 type ZEntry = (Score, Vec<u8>);
 
 /// the value type in our Store
+#[derive(Clone)]
 pub struct Entry {
     pub value: Value,
     pub expires_at: Option<Instant>,
@@ -25,6 +26,7 @@ impl Entry {
     }
 }
 
+#[derive(Clone)]
 pub enum Value {
     String(Vec<u8>),
     List(VecDeque<Vec<u8>>),
@@ -97,15 +99,14 @@ impl Db {
         self.data.get_mut(key)
     }
 
-    pub fn readonly_entry(&self, key: &[u8]) -> Option<&Entry> {
-        if self
-            .data
+    pub fn readonly_entry<'a>(data: &'a HashMap<Vec<u8>, Entry>, key: &[u8]) -> Option<&'a Entry> {
+        if data
             .get(key)
             .and_then(|e| e.expires_at)
             .is_some_and(|t| t <= Instant::now()) {
             None
         } else {
-            self.data.get(key)
+            data.get(key)
         }
     }
 

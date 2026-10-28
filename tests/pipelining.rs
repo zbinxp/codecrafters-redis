@@ -4047,3 +4047,56 @@ fn pexpireat_does_not_resurrect_expired_key() {
         .expect(b":0\r\n");
     t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// ar5: BGREWRITEAOF (v1, synchronous multi-part rewrite)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bgrewriteaof_compacts_and_survives_restart() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-bgrewrite");
+    let dir_s = dir.to_string_lossy().to_string();
+    let args = [
+        "--dir",
+        dir_s.as_str(),
+        "--appendonly",
+        "yes",
+        "--appenddirname",
+        "appendonlydir",
+        "--appendfilename",
+        "appendonly.aof",
+        "--appendfsync",
+        "always",
+    ];
+
+    let addr1 = free_addr();
+    let s1 = Server::start_on(&addr1, &args);
+    let mut c1 = Client::connect_to(&addr1);
+    c1.cmd(&[b"SET", b"foo", b"1"]).expect(b"+OK\r\n");
+    c1.cmd(&[b"SET", b"foo", b"2"]).expect(b"+OK\r\n");
+    c1.cmd(&[b"BGREWRITEAOF"])
+        .expect(b"+Background append only file rewriting started\r\n");
+
+    // The base file holds only the final value (two SETs compacted into one).
+    let aof_dir = dir.join("appendonlydir");
+    let base = std::fs::read_dir(&aof_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".base.aof"))
+        .expect("no base file after BGREWRITEAOF");
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n2\r\n"
+    );
+    // The pre-rewrite incr file was removed.
+    assert!(!aof_dir.join("appendonly.aof.1.incr.aof").exists());
+
+    // Restart against the same dir: the rewritten AOF restores the state.
+    drop(s1);
+    let addr2 = free_addr();
+    let _s2 = Server::start_on(&addr2, &args);
+    let mut c2 = Client::connect_to(&addr2);
+    c2.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n2\r\n");
+}
