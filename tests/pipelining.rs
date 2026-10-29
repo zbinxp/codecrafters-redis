@@ -4190,3 +4190,89 @@ fn bgrewriteaof_keeps_writes_made_while_rewriting() {
     c2.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n1\r\n");
     c2.cmd(&[b"GET", b"bar"]).expect(b"$1\r\n2\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// ar7: orphan/.tmp cleanup on startup
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cleans_orphan_aof_files_on_startup() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-cleanup");
+    let aof_dir = dir.join("appendonlydir");
+    std::fs::create_dir_all(&aof_dir).unwrap();
+
+    // The active manifest + incr.
+    std::fs::write(
+        aof_dir.join("appendonly.aof.manifest"),
+        "file active.1.incr.aof seq 1 type i\n",
+    )
+    .unwrap();
+    std::fs::write(
+        aof_dir.join("active.1.incr.aof"),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    )
+    .unwrap();
+    // An orphan incr, a temp file, and an unrelated file.
+    std::fs::write(aof_dir.join("orphan.2.incr.aof"), b"").unwrap();
+    std::fs::write(aof_dir.join("base.tmp"), b"").unwrap();
+    std::fs::write(aof_dir.join("notes.txt"), b"keep me").unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    // The active incr still loads.
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+
+    assert!(
+        !aof_dir.join("orphan.2.incr.aof").exists(),
+        "orphan incr should be removed"
+    );
+    assert!(
+        !aof_dir.join("base.tmp").exists(),
+        "tmp file should be removed"
+    );
+    assert!(
+        aof_dir.join("active.1.incr.aof").exists(),
+        "active incr must be kept"
+    );
+    assert!(
+        aof_dir.join("appendonly.aof.manifest").exists(),
+        "manifest must be kept"
+    );
+    assert!(
+        aof_dir.join("notes.txt").exists(),
+        "unrelated file must not be touched"
+    );
+}
+
+#[test]
+fn does_not_clean_aof_files_when_appendonly_is_off() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-cleanup-off");
+    let aof_dir = dir.join("appendonlydir");
+    std::fs::create_dir_all(&aof_dir).unwrap();
+    std::fs::write(aof_dir.join("orphan.1.incr.aof"), b"").unwrap();
+    std::fs::write(aof_dir.join("base.tmp"), b"").unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "no",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+
+    assert!(
+        aof_dir.join("orphan.1.incr.aof").exists(),
+        "AOF must not be touched when appendonly is off"
+    );
+    assert!(aof_dir.join("base.tmp").exists());
+}

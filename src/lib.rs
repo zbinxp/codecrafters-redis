@@ -10,7 +10,7 @@ mod replica;
 mod rdb;
 mod aof;
 
-use std::{fs, sync::{Arc, Mutex}};
+use std::{collections::HashSet, fs, io, path::PathBuf, sync::{Arc, Mutex}};
 
 use bytes::BytesMut;
 use tokio::{
@@ -61,10 +61,11 @@ pub async fn run(config: Config) {
 
     if store.appendonly.eq_ignore_ascii_case("yes") {
         let aof_dir = format!("{}/{}", store.dir, store.appenddirname);
+        let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
         if let Err(e) = std::fs::create_dir_all(&aof_dir) {
             eprintln!("failed to create AOF directory {aof_dir}: {e}");
         }
-        let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
+        
         // read active aof name
         let names = match fs::read_to_string(&manifest_path) {
             Ok(text) => aof::parse_manifest(&text).unwrap_or_else(|| {
@@ -78,6 +79,11 @@ pub async fn run(config: Config) {
                 vec![name]
             }
         };
+
+        // cleanup temp files of AOF 
+        if let Err(e) = cleanup_orphan(&aof_dir, &manifest_path) {
+            eprintln!("failed to clean orphan files of AOF: {e}");
+        }
 
         // replay existing aof
         for incr_name in names.iter() {
@@ -148,4 +154,41 @@ fn replay_aof(bytes: &[u8], store: &mut Store) {
     while let Some(frame) = decoder.parse() {
         let _ = execute(&frame, &mut conn, store);
     }
+}
+
+fn cleanup_orphan(aof_dir: &str, manifest_path: &str) -> io::Result<usize> {
+    // `.tmp` files；files (`*.base.*` / `*.incr.*`) not contained in manifest
+    let dir = PathBuf::from(aof_dir);
+    if !dir.is_dir() {
+        return Ok(0)
+    }
+    let content = fs::read_to_string(manifest_path)?;
+    let keep_files = aof::parse_manifest(&content).unwrap_or_default();
+    let mut keep_set = HashSet::new();
+    keep_set.extend(keep_files);
+    
+    if let Some(name) = PathBuf::from(manifest_path).file_name().and_then(|s|s.to_str()) {
+        keep_set.insert(name.to_string());
+    }
+
+    let mut targets = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let file_name = path.file_name().and_then(|s|s.to_str()).unwrap_or_default();
+        let is_aof_artifact = file_name.ends_with(".tmp") || file_name.contains(".base.") || file_name.contains(".incr.");
+        if is_aof_artifact && !keep_set.contains(file_name) {
+            targets.push(path);
+        }
+    }
+
+    let mut deleted = 0;
+    for path in targets {
+        match fs::remove_file(&path) {
+            Ok(_) => deleted += 1,
+            Err(e) => eprintln!("failed to delete file {} : {}", path.display(), e),
+        };
+    }
+    Ok(deleted)
 }
