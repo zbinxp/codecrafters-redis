@@ -4,11 +4,12 @@
 > Order verified against `codecrafters task -stage +N` (boundaries: cc3, fn4, ic1, jn4).
 > Source: codecrafters-io/build-your-own-redis course-definition. Generated: 2026-09-27.
 >
-> **Progress: 83 done.** core #1–7, Lists #8–18, Streams #19–31,
-> Transactions #32–42, Optimistic Locking #43–50, Replication #51–68.
+> **Progress: 99 done.** core #1–7, Lists #8–18, Streams #19–31,
+> Transactions #32–42, Optimistic Locking #43–50, Replication #51–68,
+> RDB Persistence #69–74, AOF Persistence #75–84.
 > Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** and are done.
-> **NEXT: `zg5` — RDB file config (#69)**, then AOF #75–84, Bitmaps #100–108,
-> Geospatial #109–116, Authentication #117–124.
+> **NEXT: `bq9` — Create a bitmap (#100)**, then Geospatial #109–116,
+> Authentication #117–124.
 
 | # | Stage | Slug | Group | Status |
 |---|-------|------|-------|--------|
@@ -80,22 +81,22 @@
 | 66 | WAIT with no replicas | `my8` | Replication | done |
 | 67 | WAIT with no commands | `tu8` | Replication | done |
 | 68 | WAIT with multiple commands | `na2` | Replication | done |
-| 69 | RDB file config | `zg5` | RDB Persistence |  |
-| 70 | Read a key | `jz6` | RDB Persistence |  |
-| 71 | Read a string value | `gc6` | RDB Persistence |  |
-| 72 | Read multiple keys | `jw4` | RDB Persistence |  |
-| 73 | Read multiple string values | `dq3` | RDB Persistence |  |
-| 74 | Read value with expiry | `sm4` | RDB Persistence |  |
-| 75 | Default AOF options | `uj3` | AOF Persistence |  |
-| 76 | AOF options from flags | `vd9` | AOF Persistence |  |
-| 77 | Create append-only directory | `fm0` | AOF Persistence |  |
-| 78 | Create append-only file | `dw4` | AOF Persistence |  |
-| 79 | Create manifest file | `pb9` | AOF Persistence |  |
-| 80 | Write a single command | `dc8` | AOF Persistence |  |
-| 81 | Write multiple commands | `fi1` | AOF Persistence |  |
-| 82 | Filter write commands | `ep6` | AOF Persistence |  |
-| 83 | Replay a single command | `xz2` | AOF Persistence |  |
-| 84 | Replay multiple commands | `kn2` | AOF Persistence |  |
+| 69 | RDB file config | `zg5` | RDB Persistence | done |
+| 70 | Read a key | `jz6` | RDB Persistence | done |
+| 71 | Read a string value | `gc6` | RDB Persistence | done |
+| 72 | Read multiple keys | `jw4` | RDB Persistence | done |
+| 73 | Read multiple string values | `dq3` | RDB Persistence | done |
+| 74 | Read value with expiry | `sm4` | RDB Persistence | done |
+| 75 | Default AOF options | `uj3` | AOF Persistence | done |
+| 76 | AOF options from flags | `vd9` | AOF Persistence | done |
+| 77 | Create append-only directory | `fm0` | AOF Persistence | done |
+| 78 | Create append-only file | `dw4` | AOF Persistence | done |
+| 79 | Create manifest file | `pb9` | AOF Persistence | done |
+| 80 | Write a single command | `dc8` | AOF Persistence | done |
+| 81 | Write multiple commands | `fi1` | AOF Persistence | done |
+| 82 | Filter write commands | `ep6` | AOF Persistence | done |
+| 83 | Replay a single command | `xz2` | AOF Persistence | done |
+| 84 | Replay multiple commands | `kn2` | AOF Persistence | done |
 | 85 | Subscribe to a channel | `mx3` | Pub/Sub | done |
 | 86 | Subscribe to multiple channels | `zc8` | Pub/Sub | done |
 | 87 | Enter subscribed mode | `aw8` | Pub/Sub | done |
