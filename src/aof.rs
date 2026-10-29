@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::{self, File}, io::{self, Write}, path::PathBuf, time::Instant};
+use std::{collections::HashMap, fs::{self, File}, io::{self, Write}, path::PathBuf, sync::atomic::Ordering, time::Instant};
 
 use bytes::BytesMut;
 
@@ -9,6 +9,12 @@ pub fn cmd_bgrewriteaof(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> 
     if args.len() != 1 {
         return Err(RedisError::wrong_args("bgrewriteaof"));
     }
+
+    // avoid concurrent aof rewrite
+    if store.aof_rewrite_in_progress.load(Ordering::SeqCst) {
+        return Ok(vec![Frame::Err("ERR Background append only file rewriting already in progress".to_string())])
+    }
+    store.aof_rewrite_in_progress.store(true, Ordering::SeqCst);
 
     let aof_dir = format!("{}/{}", store.dir, store.appenddirname);
     let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
@@ -34,25 +40,40 @@ pub fn cmd_bgrewriteaof(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> 
 
     // 2. Owned snapshot; no borrow of `store` is held below.
     let snapshot = store.data.clone();
+    let flag = store.aof_rewrite_in_progress.clone();
 
+    tokio::task::spawn_blocking( move || {
+        if let Err(e) = write_snapshot_to_disk(snapshot, aof_dir, &manifest_path, file_names, base_name, incr_name, seq) {
+            eprintln!("failed to write snapshot to disk: {e}");
+        };
+        flag.store(false, Ordering::SeqCst);
+    });
+
+    Ok(vec![Frame::simple(
+        "Background append only file rewriting started",
+    )])
+}
+
+fn write_snapshot_to_disk(
+    snapshot: HashMap<Vec<u8>, Entry>, 
+    aof_dir:String, 
+    manifest_path: &str,
+    file_names: Vec<String>,
+    base_name:String, 
+    incr_name:String, 
+    seq:u64) -> io::Result<()> {
     // 3. Write the base: tmp -> fsync -> rename.
     let bytes = serialize_data(&snapshot);
     let base_tmp = format!("{}/{}.tmp", aof_dir, base_name);
     let base_path = format!("{}/{}", aof_dir, base_name);
     match File::create(&base_tmp) {
         Ok(mut f) => {
-            if let Err(e) = f.write_all(&bytes) {
-                eprintln!("failed to write base file {base_tmp}: {e}");
-            }
-            if let Err(e) = f.sync_all() {
-                eprintln!("failed to sync base file {base_tmp}: {e}");
-            }
+            f.write_all(&bytes)?;
+            f.sync_all()?;
         }
-        Err(e) => eprintln!("failed to create base file {base_tmp}: {e}"),
+        Err(e) => return Err(e),
     }
-    if let Err(e) = fs::rename(&base_tmp, &base_path) {
-        eprintln!("failed to rename base file: {e}");
-    }
+    fs::rename(&base_tmp, &base_path)?;
 
     // 4. Atomically switch the manifest (temp -> fsync -> rename).
     let manifest_ok = match atomic_write_manifest(&aof_dir, &manifest_path, &base_name, &incr_name, seq) {
@@ -68,15 +89,10 @@ pub fn cmd_bgrewriteaof(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> 
     if manifest_ok {
         for name in &file_names {
             let path = format!("{}/{}", aof_dir, name);
-            if let Err(e) = fs::remove_file(&path) {
-                eprintln!("failed to remove old AOF file {path}: {e}");
-            }
+            fs::remove_file(&path)?;
         }
     }
-
-    Ok(vec![Frame::simple(
-        "Background append only file rewriting started",
-    )])
+    Ok(())
 }
 
 fn atomic_write_manifest(
@@ -511,5 +527,30 @@ mod tests {
         let ms: u64 = util::parse(exp[2].as_bulk().unwrap()).unwrap();
         let now = util::now_ms();
         assert!(ms >= now + 9_000 && ms <= now + 11_000, "PEXPIREAT {ms} (now {now})");
+    }
+
+    /// ar6: while a background rewrite is running, a second BGREWRITEAOF must
+    /// be rejected without starting another one.
+    #[test]
+    fn bgrewriteaof_rejects_second_call_while_running() {
+        let mut store = empty_store();
+        store.aof_rewrite_in_progress.store(true, Ordering::SeqCst);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut conn = Conn::new(0, tx);
+        let args = vec![Frame::bulk("BGREWRITEAOF")];
+
+        let frames = match cmd_bgrewriteaof(&args, &mut conn, &mut store) {
+            Ok(frames) => frames,
+            Err(e) => panic!("expected an error frame, got Err({})", e.message),
+        };
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::Err(msg) => assert!(
+                msg.contains("already in progress"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected an error frame, got {other:?}"),
+        }
     }
 }

@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet, HashMap, VecDeque}, time::{Instant}};
+use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet, HashMap, VecDeque}, sync::{Arc, atomic::AtomicBool}, time::Instant};
 
 use tokio::{sync::{
         mpsc,
@@ -55,6 +55,7 @@ pub(crate) struct Db {
     pub appendfilename: String, // appendonly.aof
     pub appendfsync: String, // everysec
     pub aof: Option<std::fs::File>,
+    pub aof_rewrite_in_progress: Arc<AtomicBool>,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
@@ -83,6 +84,7 @@ impl Db {
             appendfilename: "appendonly.aof".to_string(),
             appendfsync: "everysec".to_string(),
             aof: None,
+            aof_rewrite_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
     

@@ -3478,6 +3478,43 @@ fn unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Poll `cond` until it is true, panicking after ~2s.
+fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !cond() {
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for {what}");
+        }
+        sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait for the background rewrite to publish a `type b` entry whose file
+/// exists, then return that base path.
+fn wait_for_rewrite(dir: &std::path::Path) -> std::path::PathBuf {
+    let aof_dir = dir.join("appendonlydir");
+    let manifest = aof_dir.join("appendonly.aof.manifest");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&manifest) {
+            if let Some(base_name) = content.lines().find_map(|line| {
+                let t: Vec<&str> = line.split_whitespace().collect();
+                (t.len() >= 6 && t[0] == "file" && t[4] == "type" && t[5] == "b")
+                    .then(|| t[1].to_string())
+            }) {
+                let base = aof_dir.join(base_name);
+                if base.is_file() {
+                    return base;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("rewrite did not publish a base file within 2s");
+        }
+        sleep(Duration::from_millis(10));
+    }
+}
+
 /// Create `<root>/appendonlydir` with a manifest pointing at `incr_name`, plus
 /// the empty incr file. Returns the appendonlydir path.
 fn setup_aof_dir(root: &std::path::Path, incr_name: &str) -> std::path::PathBuf {
@@ -4078,20 +4115,19 @@ fn bgrewriteaof_compacts_and_survives_restart() {
     c1.cmd(&[b"BGREWRITEAOF"])
         .expect(b"+Background append only file rewriting started\r\n");
 
-    // The base file holds only the final value (two SETs compacted into one).
+    // ar6: the rewrite runs in the background, so wait for it to publish the
+    // new base before inspecting the files.
     let aof_dir = dir.join("appendonlydir");
-    let base = std::fs::read_dir(&aof_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with(".base.aof"))
-        .expect("no base file after BGREWRITEAOF");
+    let base = wait_for_rewrite(&dir);
     assert_eq!(
         std::fs::read(&base).unwrap(),
         b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n2\r\n"
     );
-    // The pre-rewrite incr file was removed.
-    assert!(!aof_dir.join("appendonly.aof.1.incr.aof").exists());
+    // The pre-rewrite incr file is removed once the manifest is switched.
+    wait_until(
+        || !aof_dir.join("appendonly.aof.1.incr.aof").exists(),
+        "old incr removal",
+    );
 
     // Restart against the same dir: the rewritten AOF restores the state.
     drop(s1);
@@ -4099,4 +4135,58 @@ fn bgrewriteaof_compacts_and_survives_restart() {
     let _s2 = Server::start_on(&addr2, &args);
     let mut c2 = Client::connect_to(&addr2);
     c2.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n2\r\n");
+}
+
+/// ar6: writes issued after BGREWRITEAOF returns go to the new incr, not the
+/// base snapshot, and survive a restart.
+#[test]
+fn bgrewriteaof_keeps_writes_made_while_rewriting() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-bgrewrite-concurrent");
+    let dir_s = dir.to_string_lossy().to_string();
+    let args = [
+        "--dir",
+        dir_s.as_str(),
+        "--appendonly",
+        "yes",
+        "--appenddirname",
+        "appendonlydir",
+        "--appendfilename",
+        "appendonly.aof",
+        "--appendfsync",
+        "always",
+    ];
+
+    let addr = free_addr();
+    let s = Server::start_on(&addr, &args);
+    let mut c = Client::connect_to(&addr);
+
+    c.cmd(&[b"SET", b"foo", b"1"]).expect(b"+OK\r\n");
+    c.cmd(&[b"BGREWRITEAOF"])
+        .expect(b"+Background append only file rewriting started\r\n");
+    // The handler switches store.aof before replying, so this write lands in
+    // the new incr (the base snapshot was taken before it).
+    c.cmd(&[b"SET", b"bar", b"2"]).expect(b"+OK\r\n");
+
+    let base = wait_for_rewrite(&dir);
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n"
+    );
+
+    let aof_dir = dir.join("appendonlydir");
+    let incr = aof_dir.join("appendonly.aof.2.incr.aof");
+    wait_until(|| incr.exists(), "new incr");
+    assert_eq!(
+        std::fs::read(&incr).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+    );
+
+    // Restart: base (foo) and the new incr (bar) are both replayed.
+    drop(s);
+    let addr2 = free_addr();
+    let _s2 = Server::start_on(&addr2, &args);
+    let mut c2 = Client::connect_to(&addr2);
+    c2.cmd(&[b"GET", b"foo"]).expect(b"$1\r\n1\r\n");
+    c2.cmd(&[b"GET", b"bar"]).expect(b"$1\r\n2\r\n");
 }
