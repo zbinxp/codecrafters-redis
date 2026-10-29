@@ -130,6 +130,10 @@ impl Decoder {
         self.buf.advance(len);
         Some(frame)
     }
+
+    pub fn pending(&self) -> usize {
+        self.buf.len()
+    }
 }
 
 /// Parse one frame from the front of `buf`, returning it and the number of

@@ -10,7 +10,7 @@ mod replica;
 mod rdb;
 mod aof;
 
-use std::{collections::HashSet, fs, io, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashSet, fs, io::{self, Read}, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
 use bytes::BytesMut;
 use tokio::{
@@ -88,13 +88,21 @@ pub async fn run(config: Config) {
         // replay existing aof
         for incr_name in names.iter() {
             let path = format!("{}/{}", aof_dir, incr_name);
-            if let Ok(bytes) = fs::read(&path) {
-                if incr_name.ends_with(".rdb") {
+            if incr_name.ends_with(".rdb") {
+                if let Ok(bytes) = fs::read(&path) {
                     rdb::load(&bytes, &mut store);
-                } else {
-                    replay_aof(&bytes, &mut store);
+                }
+            } else {
+                match replay_aof(Path::new(&path), &mut store) {
+                    Ok(valid_len) => {
+                        if let Err(e) = truncate_file(&path, valid_len) {
+                            eprintln!("failed to truncate file {path}:{e}");
+                        }
+                    },
+                    Err(e) => eprintln!("failed to replay {path}: {e}"),
                 }
             }
+            
         }
 
         names.last().into_iter().for_each(|incr_name| {
@@ -144,16 +152,35 @@ pub async fn run(config: Config) {
     }
 }
 
-fn replay_aof(bytes: &[u8], store: &mut Store) {
+/// return valid length of AOF
+fn replay_aof(path: &std::path::Path, store: &mut Store) -> io::Result<u64> {
+    let mut f = fs::File::open(path)?;
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut conn = Conn::new(0, tx);
     conn.from_master = true;
     conn.replaying = true;
+
     let mut decoder = Decoder::new();
-    decoder.extend(bytes);
-    while let Some(frame) = decoder.parse() {
-        let _ = execute(&frame, &mut conn, store);
+    let mut chunk = [0u8; 64*1024];
+    let mut total = 0;
+    loop {
+        let n = f.read(&mut chunk)?;
+        total += n as u64;
+        if n == 0 { 
+            break; 
+        }
+        decoder.extend(&chunk[..n]);
+        while let Some(frame) = decoder.parse() {
+            let _ = execute(&frame, &mut conn, store);
+        }
     }
+    Ok(total - decoder.pending() as u64)
+}
+
+fn truncate_file(path: &str, valid_len:u64) -> io::Result<()> {
+    let f = fs::OpenOptions::new().write(true).open(path)?;
+    f.set_len(valid_len)?;
+    Ok(())
 }
 
 fn cleanup_orphan(aof_dir: &str, manifest_path: &str) -> io::Result<usize> {

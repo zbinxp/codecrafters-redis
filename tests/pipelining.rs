@@ -4276,3 +4276,81 @@ fn does_not_clean_aof_files_when_appendonly_is_off() {
     );
     assert!(aof_dir.join("base.tmp").exists());
 }
+
+// ---------------------------------------------------------------------------
+// ar8: truncate an incomplete trailing AOF command on load
+// ---------------------------------------------------------------------------
+
+const VALID_SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+/// A prefix of a legitimate SET, cut in the middle of a bulk string.
+const TRUNCATED_SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nba";
+
+fn aof_args(dir_s: &str) -> [&str; 9] {
+    [
+        "--dir",
+        dir_s,
+        "--appendonly",
+        "yes",
+        "--appenddirname",
+        "appendonlydir",
+        "--appendfilename",
+        "appendonly.aof",
+        "--appendfsync",
+    ]
+}
+
+#[test]
+fn truncates_incomplete_trailing_aof_command() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-truncated");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+
+    let mut content = VALID_SET.to_vec();
+    content.extend_from_slice(TRUNCATED_SET);
+    std::fs::write(aof_dir.join("random.1.incr.aof"), &content).unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &aof_args(&dir_s));
+    let mut c = Client::connect_to(&addr);
+    // The complete command was applied; the incomplete tail was ignored.
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+
+    // The tail must be truncated so a later append is not glued to it.
+    let after = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(after, VALID_SET, "incomplete trailing command was not truncated");
+}
+
+#[test]
+fn truncates_aof_with_only_an_incomplete_command() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-truncated-only");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    std::fs::write(aof_dir.join("random.1.incr.aof"), TRUNCATED_SET).unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &aof_args(&dir_s));
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$-1\r\n");
+
+    let after = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert!(after.is_empty(), "file should be truncated to zero bytes");
+}
+
+#[test]
+fn keeps_a_complete_aof_unchanged() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-complete");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    std::fs::write(aof_dir.join("random.1.incr.aof"), VALID_SET).unwrap();
+
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &aof_args(&dir_s));
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+
+    let after = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(after, VALID_SET, "a complete AOF must not be modified");
+}
