@@ -33,6 +33,8 @@ pub struct Config {
     pub appenddirname: Option<String>,
     pub appendfilename: Option<String>,
     pub appendfsync: Option<String>,
+    pub auto_aof_rewrite_min_size: Option<u64>,
+    pub auto_aof_rewrite_percentage: Option<u64>,
 }
 
 
@@ -53,6 +55,12 @@ pub async fn run(config: Config) {
     }
     if let Some(v) = config.appendfsync {
         store.appendfsync = v;
+    }
+    if let Some(v) = config.auto_aof_rewrite_min_size {
+        store.auto_aof_rewrite_min_size = v;
+    }
+    if let Some(v) = config.auto_aof_rewrite_percentage {
+        store.auto_aof_rewrite_percentage = v;
     }
     let path = format!("{}/{}", store.dir, store.dbfilename);
     if let Ok(bytes) = std::fs::read(&path) {

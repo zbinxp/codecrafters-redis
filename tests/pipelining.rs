@@ -4354,3 +4354,189 @@ fn keeps_a_complete_aof_unchanged() {
     let after = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
     assert_eq!(after, VALID_SET, "a complete AOF must not be modified");
 }
+
+// ---------------------------------------------------------------------------
+// ar9: INFO persistence + automatic rewrite
+// ---------------------------------------------------------------------------
+
+fn info_persistence_lines(c: &mut Client) -> Vec<String> {
+    c.cmd(&[b"INFO", b"persistence"]);
+    let hdr = c.read_line();
+    assert!(
+        hdr.starts_with(b"$"),
+        "expected a bulk header, got {:?}",
+        String::from_utf8_lossy(&hdr)
+    );
+    let mut lines = Vec::new();
+    loop {
+        let line = String::from_utf8(c.read_line()).expect("INFO line is UTF-8");
+        let done = line.starts_with("aof_last_bgrewrite_status:");
+        lines.push(line);
+        if done {
+            break;
+        }
+    }
+    // The INFO text ends with CRLF and the bulk-string framing adds one more;
+    // consume that protocol terminator so it does not leak into the next reply.
+    let tail = c.read_line();
+    assert!(
+        tail.is_empty(),
+        "expected the bulk-string terminator, got {:?}",
+        String::from_utf8_lossy(&tail)
+    );
+    lines
+}
+
+fn info_value(lines: &[String], key: &str) -> String {
+    let prefix = format!("{key}:");
+    lines
+        .iter()
+        .find_map(|l| l.strip_prefix(&prefix).map(str::to_string))
+        .unwrap_or_else(|| panic!("missing {key} in {lines:?}"))
+}
+
+fn expect_bulk_pair(c: &mut Client, cmd: &[&[u8]], name: &str, value: &str) {
+    let expected = format!(
+        "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+        name.len(),
+        name,
+        value.len(),
+        value
+    );
+    c.cmd(cmd).expect(expected.as_bytes());
+}
+
+#[test]
+fn info_persistence_reports_aof_state() {
+    let _guard = lock_server();
+    let dir = fresh_dir("info-persistence");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let mut c = Client::connect_to(&addr);
+
+    let lines = info_persistence_lines(&mut c);
+    assert_eq!(info_value(&lines, "aof_enabled"), "1");
+    assert_eq!(info_value(&lines, "aof_rewrite_in_progress"), "0");
+    assert_eq!(info_value(&lines, "aof_base_size"), "0");
+    assert_eq!(info_value(&lines, "aof_last_bgrewrite_status"), "ok");
+
+    c.cmd(&[b"SET", b"foo", b"bar"]).expect(b"+OK\r\n");
+    let lines = info_persistence_lines(&mut c);
+    let size: u64 = info_value(&lines, "aof_current_size").parse().unwrap();
+    assert!(size > 0, "aof_current_size should grow after a write");
+}
+
+#[test]
+fn info_persistence_reports_aof_disabled() {
+    let mut t = TestCtx::new(); // no --appendonly -> default "no"
+    let lines = info_persistence_lines(&mut t.client);
+    assert_eq!(info_value(&lines, "aof_enabled"), "0");
+    assert_eq!(info_value(&lines, "aof_current_size"), "0");
+    assert_eq!(info_value(&lines, "aof_base_size"), "0");
+}
+
+#[test]
+fn info_persistence_reflects_rewrite() {
+    let _guard = lock_server();
+    let dir = fresh_dir("info-persistence-rewrite");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"bar"]).expect(b"+OK\r\n");
+    c.cmd(&[b"BGREWRITEAOF"])
+        .expect(b"+Background append only file rewriting started\r\n");
+    wait_for_rewrite(&dir);
+
+    // The flag is cleared after the background task finishes; poll for it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lines = info_persistence_lines(&mut c);
+        if info_value(&lines, "aof_rewrite_in_progress") == "0" {
+            let base: u64 = info_value(&lines, "aof_base_size").parse().unwrap();
+            assert!(base > 0, "aof_base_size should be > 0 after a rewrite");
+            assert_eq!(info_value(&lines, "aof_last_bgrewrite_status"), "ok");
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("rewrite still reported in progress after 2s");
+        }
+        sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn auto_aof_rewrite_triggers_at_min_size() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-auto-rewrite");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--auto-aof-rewrite-min-size", "1",
+        "--auto-aof-rewrite-percentage", "0",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"bar"]).expect(b"+OK\r\n");
+
+    // The write crosses the 1-byte threshold, so a rewrite starts by itself.
+    let base = wait_for_rewrite(&dir);
+    assert!(std::fs::metadata(&base).unwrap().len() > 0);
+    c.cmd(&[b"GET", b"foo"]).expect(b"$3\r\nbar\r\n");
+}
+
+#[test]
+fn auto_aof_rewrite_does_not_trigger_below_min_size() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-auto-off");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--auto-aof-rewrite-min-size", "1000000",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"foo", b"bar"]).expect(b"+OK\r\n");
+    sleep(Duration::from_millis(150));
+
+    let aof_dir = dir.join("appendonlydir");
+    let has_base = std::fs::read_dir(&aof_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().to_string_lossy().ends_with(".base.aof"));
+    assert!(!has_base, "rewrite must not trigger below the min size");
+}
+
+#[test]
+fn config_get_auto_aof_rewrite_options() {
+    let mut t = TestCtx::new();
+    expect_bulk_pair(
+        &mut t.client,
+        &[b"CONFIG", b"GET", b"auto-aof-rewrite-min-size"],
+        "auto-aof-rewrite-min-size",
+        "67108864",
+    );
+    expect_bulk_pair(
+        &mut t.client,
+        &[b"CONFIG", b"GET", b"auto-aof-rewrite-percentage"],
+        "auto-aof-rewrite-percentage",
+        "100",
+    );
+}

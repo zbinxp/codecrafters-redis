@@ -8,7 +8,7 @@ use crate::commands::{
     cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange,
     cmd_zrank, cmd_zrem, cmd_zscore,
 };
-use crate::aof::cmd_bgrewriteaof;
+use crate::aof::{cmd_bgrewriteaof, should_auto_rewrite};
 use crate::db::{Role, Store};
 use crate::error::RedisError;
 use crate::resp::Frame;
@@ -139,6 +139,12 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
                     store.master_repl_offset += cmd.frame_len() as u64;
                     for out in store.replicas.values() {
                         let _ = out.send(cmd.clone());
+                    }
+
+                    // --- auto rewrite when the AOF has grown enough ---
+                    if should_auto_rewrite(store) {
+                        let bg = Frame::bulk("BGREWRITEAOF");
+                        let _ = cmd_bgrewriteaof(std::slice::from_ref(&bg), conn, store);
                     }
                 }
             }

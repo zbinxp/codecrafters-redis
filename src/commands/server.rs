@@ -1,4 +1,4 @@
-use std::{sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{sync::{Arc, Mutex, atomic::Ordering}, time::{Duration, Instant}};
 
 use tokio::time::sleep;
 
@@ -26,6 +26,19 @@ pub fn cmd_info(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResul
             out.push_str(&format!("master_host:{}\r\n", host));
             out.push_str(&format!("master_port:{}\r\n", port));
         }
+    }
+
+    if section.is_none() || section.is_some_and(|s|s.eq_ignore_ascii_case(b"persistence")){
+        let (base_size, current_size) = crate::aof::aof_sizes(store);
+        let enabled = if store.appendonly.eq_ignore_ascii_case("yes") { 1 } else { 0 };
+        out.push_str("# Persistence\r\n");
+        out.push_str(&format!("aof_enabled:{enabled}\r\n"));
+        out.push_str(&format!("aof_rewrite_in_progress:{}\r\n",
+            store.aof_rewrite_in_progress.load(Ordering::SeqCst) as u8));
+        out.push_str(&format!("aof_current_size:{current_size}\r\n"));
+        out.push_str(&format!("aof_base_size:{base_size}\r\n"));
+        out.push_str(&format!("aof_last_bgrewrite_status:{}\r\n",
+            if store.aof_last_bgrewrite_ok.load(Ordering::SeqCst) { "ok" } else { "err" }));
     }
 
     Ok(vec![Frame::bulk(out)])
@@ -72,6 +85,10 @@ pub fn cmd_config(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
         store.appendfilename.clone()
     } else if param.eq_ignore_ascii_case(b"appendfsync") {
         store.appendfsync.clone()
+    } else if param.eq_ignore_ascii_case(b"auto-aof-rewrite-min-size") {
+        store.auto_aof_rewrite_min_size.to_string()
+    } else if param.eq_ignore_ascii_case(b"auto-aof-rewrite-percentage") {
+        store.auto_aof_rewrite_percentage.to_string()
     } else {
         return Ok(vec![Frame::Array(Vec::new())])
     };

@@ -41,17 +41,69 @@ pub fn cmd_bgrewriteaof(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> 
     // 2. Owned snapshot; no borrow of `store` is held below.
     let snapshot = store.data.clone();
     let flag = store.aof_rewrite_in_progress.clone();
+    let ok_flag = store.aof_last_bgrewrite_ok.clone();
 
-    tokio::task::spawn_blocking( move || {
-        if let Err(e) = write_snapshot_to_disk(snapshot, aof_dir, &manifest_path, file_names, base_name, incr_name, seq) {
+    tokio::task::spawn_blocking(move || {
+        let result = write_snapshot_to_disk(
+            snapshot,
+            aof_dir,
+            &manifest_path,
+            file_names,
+            base_name,
+            incr_name,
+            seq,
+        );
+        if let Err(e) = &result {
             eprintln!("failed to write snapshot to disk: {e}");
-        };
+        }
+        ok_flag.store(result.is_ok(), Ordering::SeqCst);
         flag.store(false, Ordering::SeqCst);
     });
 
     Ok(vec![Frame::simple(
         "Background append only file rewriting started",
     )])
+}
+
+/// (base size, current incr size) of the active AOF files.
+pub fn aof_sizes(store: &Store) -> (u64, u64) {
+    let aof_dir = format!("{}/{}", store.dir, store.appenddirname);
+    let manifest_path = format!("{}/{}.manifest", aof_dir, store.appendfilename);
+    let content = fs::read_to_string(manifest_path).unwrap_or_default();
+    let entries = parse_manifest_all(&content).unwrap_or_default();
+    let mut base = 0;
+    let mut current = 0;
+    for (kind, _, name) in &entries {
+        let size = fs::metadata(format!("{}/{}", aof_dir, name))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if kind == "b" {
+            base = size;
+        } else {
+            current = size;
+        }
+    }
+    (base, current)
+}
+
+/// Whether the AOF has grown enough to trigger an automatic rewrite.
+pub fn should_auto_rewrite(store: &Store) -> bool {
+    if !store.appendonly.eq_ignore_ascii_case("yes") {
+        return false;
+    }
+    if store.aof_rewrite_in_progress.load(Ordering::SeqCst) {
+        return false;
+    }
+    let (base, current) = aof_sizes(store);
+    if current == 0 || current <= store.auto_aof_rewrite_min_size {
+        return false;
+    }
+    if base == 0 {
+        return true; // first rewrite
+    }
+    current > base
+        && current.saturating_sub(base).saturating_mul(100)
+            >= base.saturating_mul(store.auto_aof_rewrite_percentage)
 }
 
 fn write_snapshot_to_disk(

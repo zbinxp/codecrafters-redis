@@ -56,6 +56,12 @@ pub(crate) struct Db {
     pub appendfsync: String, // everysec
     pub aof: Option<std::fs::File>,
     pub aof_rewrite_in_progress: Arc<AtomicBool>,
+    /// Background rewrite finished successfully (INFO persistence).
+    pub aof_last_bgrewrite_ok: Arc<AtomicBool>,
+    /// Auto-rewrite when the active AOF grows past this many bytes.
+    pub auto_aof_rewrite_min_size: u64,
+    /// Auto-rewrite when growth since the base is at least this percentage.
+    pub auto_aof_rewrite_percentage: u64,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
@@ -85,6 +91,9 @@ impl Db {
             appendfsync: "everysec".to_string(),
             aof: None,
             aof_rewrite_in_progress: Arc::new(AtomicBool::new(false)),
+            aof_last_bgrewrite_ok: Arc::new(AtomicBool::new(true)),
+            auto_aof_rewrite_min_size: 64 * 1024 * 1024,
+            auto_aof_rewrite_percentage: 100,
         }
     }
     

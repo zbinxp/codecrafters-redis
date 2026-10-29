@@ -16,6 +16,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
         appenddirname: None,
         appendfilename: None,
         appendfsync: None,
+        auto_aof_rewrite_min_size: None,
+        auto_aof_rewrite_percentage: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -41,6 +43,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Config {
             "--appenddirname" => cfg.appenddirname = args.next(),
             "--appendfilename" => cfg.appendfilename = args.next(),
             "--appendfsync" => cfg.appendfsync = args.next(),
+            "--auto-aof-rewrite-min-size" => {
+                cfg.auto_aof_rewrite_min_size = args.next().and_then(|v| v.parse().ok());
+            }
+            "--auto-aof-rewrite-percentage" => {
+                cfg.auto_aof_rewrite_percentage = args.next().and_then(|v| v.parse().ok());
+            }
             _ => {}
         }
     }
