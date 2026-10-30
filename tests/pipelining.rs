@@ -5012,3 +5012,50 @@ fn getbit_is_not_appended_to_aof() {
         b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n"
     );
 }
+
+/// yj2: bitmap commands work on any string, including one written with SET.
+/// 'A' is 0b0100_0001, so offsets 1 and 7 are set and offset 0 is not.
+#[test]
+fn getbit_reads_a_string_created_by_set() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"mykey", b"A"]).expect(b"+OK\r\n");
+    let bits: [&[u8]; 8] = [
+        b":0\r\n", b":1\r\n", b":0\r\n", b":0\r\n", b":0\r\n", b":0\r\n", b":0\r\n", b":1\r\n",
+    ];
+    for (off, reply) in bits.iter().enumerate() {
+        t.client
+            .cmd(&[b"GETBIT", b"mykey", off.to_string().as_bytes()])
+            .expect(reply);
+    }
+}
+
+/// yj2: multi-byte strings too -- "AB" is 0x41 0x42, and offset 8 is the MSB of
+/// the second byte, so 9 and 14 are the set bits there.
+#[test]
+fn getbit_reads_multibyte_string_created_by_set() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"mykey", b"AB"]).expect(b"+OK\r\n");
+    let bits: [&[u8]; 8] = [
+        b":0\r\n", b":1\r\n", b":0\r\n", b":0\r\n", b":0\r\n", b":0\r\n", b":1\r\n", b":0\r\n",
+    ];
+    for (i, reply) in bits.iter().enumerate() {
+        let off = 8 + i;
+        t.client
+            .cmd(&[b"GETBIT", b"mykey", off.to_string().as_bytes()])
+            .expect(reply);
+    }
+    // Reading past the 2-byte value is still 0, not an error.
+    t.client
+        .cmd(&[b"GETBIT", b"mykey", b"16"])
+        .expect(b":0\r\n");
+}
+
+/// pk5: GET reads back a bitmap written with SETBIT. Offset 1 is 0x40, i.e. '@'.
+#[test]
+fn get_returns_a_string_created_by_setbit() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"mykey", b"1", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"mykey"]).expect(b"$1\r\n@\r\n");
+}
