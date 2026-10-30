@@ -114,8 +114,7 @@ pub fn cmd_setbit(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
         return Err(RedisError::field_not_integer("bit"))
     }
     let value_bool = value == 1;
-    let byte_index = offset / 8;
-    let mask = 1 << (7 - offset % 8);
+    let (byte_index, mask) = byte_and_mask(offset);
     let Some(entry) = store.live_entry(key) else {
         // create new value
         let mut bytes = vec![0; byte_index+1];
@@ -141,4 +140,37 @@ pub fn cmd_setbit(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
     store.touch(key);
 
     Ok(vec![Frame::Int(old_x.into())])
+}
+
+/// GETBIT key offset
+pub fn cmd_getbit(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 3 {
+        return Err(RedisError::wrong_args("getbit"))
+    }
+
+    let key = bulk_at(args, 1).ok_or_else(|| RedisError::wrong_args("getbit"))?;
+    let offset_raw = bulk_at(args, 2).ok_or_else(|| RedisError::wrong_args("getbit"))?;
+    let offset:usize = util::parse(offset_raw).ok_or_else(|| RedisError::field_not_integer("bit offset"))?;
+    if offset > 0xFFFF_FFFF {
+        return Err(RedisError::field_not_integer("bit offset"))
+    }
+    let Some(entry) = store.live_entry(key) else {
+        return Ok(vec![Frame::Int(0)])
+    };
+    let Value::String(bytes) = &mut entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    let (byte_index, mask) = byte_and_mask(offset);
+    if byte_index >= bytes.len() {
+        return Ok(vec![Frame::Int(0)])
+    }
+    let x = bytes.get_mut(byte_index).unwrap();
+    let bit = util::get_bit(*x, mask);
+    Ok(vec![Frame::Int(bit.into())])
+}
+
+fn byte_and_mask(offset:usize) -> (usize, u8) {
+    let byte_index = offset / 8;
+    let mask = 1 << (7 - offset % 8);
+    (byte_index, mask)
 }

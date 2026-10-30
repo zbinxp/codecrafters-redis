@@ -28,6 +28,7 @@ pub use string::cmd_set;
 pub use string::cmd_incr;
 pub use string::cmd_pexpireat;
 pub use string::cmd_setbit;
+pub use string::cmd_getbit;
 
 pub use list::blpop;
 pub use list::cmd_llen;

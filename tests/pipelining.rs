@@ -4819,3 +4819,196 @@ fn setbit_is_appended_to_aof() {
         b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bitmaps (GETBIT)
+//
+// A bitmap is a string indexed MSB-first, so a one-byte string 0xff has bits
+// 0..=7 set, and offset 8 is the MSB of the second byte.
+// ---------------------------------------------------------------------------
+
+/// A missing key reads as 0 and must not be created by the read.
+#[test]
+fn getbit_missing_key_returns_zero_without_creating_it() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"0"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+    t.client.cmd(&[b"TYPE", b"bitmap"]).expect(b"+none\r\n");
+}
+
+/// Every bit of a byte round-trips through SETBIT/GETBIT, which pins the
+/// MSB-first direction: offset i is 1 << (7 - i) inside the byte.
+#[test]
+fn getbit_reads_every_bit_of_a_byte() {
+    let mut t = TestCtx::new();
+    let bits: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01];
+    for (i, byte) in bits.iter().enumerate() {
+        let key = format!("bit{i}").into_bytes();
+        let off = i.to_string().into_bytes();
+        t.client
+            .cmd(&[b"SETBIT", &key, &off, b"1"])
+            .expect(b":0\r\n");
+        let expected = [b"$1\r\n".as_slice(), &[*byte], b"\r\n"].concat();
+        t.client.cmd(&[b"GET", &key]).expect(&expected);
+        t.client
+            .cmd(&[b"GETBIT", &key, &off])
+            .expect(b":1\r\n");
+    }
+    // ...and the neighbouring bit in the same byte is still 0.
+    let key = b"bit0";
+    t.client
+        .cmd(&[b"GETBIT", key, b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GETBIT", key, b"7"])
+        .expect(b":0\r\n");
+}
+
+/// Reading across the byte boundary: offset 8 is bit 0x80 of byte 1, offset 15
+/// is bit 0x01 of byte 1.
+#[test]
+fn getbit_across_the_byte_boundary() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"8", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$2\r\n\x00\x80\r\n");
+    for off in [8u8, 9, 14, 15] {
+        let expected: &[u8] = if off == 8 { b":1\r\n" } else { b":0\r\n" };
+        t.client
+            .cmd(&[b"GETBIT", b"bitmap", off.to_string().as_bytes()])
+            .expect(expected);
+    }
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"15", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$2\r\n\x00\x81\r\n");
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"15"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"14"])
+        .expect(b":0\r\n");
+}
+
+/// Reading past the end of the string is 0, not an error, and never grows the
+/// key (`SETBIT`'s job).
+#[test]
+fn getbit_past_the_end_returns_zero_and_does_not_grow() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"1"])
+        .expect(b":0\r\n");
+    for off in [b"8".as_slice(), b"9", b"15", b"16", b"1000", b"4294967295"] {
+        t.client
+            .cmd(&[b"GETBIT", b"bitmap", off])
+            .expect(b":0\r\n");
+    }
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$1\r\n\x80\r\n");
+}
+
+/// An expired key reads as 0 and is not resurrected.
+#[test]
+fn getbit_on_expired_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"bitmap", b"\x80", b"PX", b"120"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"GETBIT", b"bitmap", b"0"]).expect(b":1\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"GETBIT", b"bitmap", b"0"]).expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+}
+
+/// A key holding a non-string type is a type error, not a 0.
+#[test]
+fn getbit_on_list_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"list", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"GETBIT", b"list", b"0"])
+        .expect(WRONGTYPE);
+}
+
+#[test]
+fn getbit_with_missing_arguments_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap"])
+        .expect(b"-ERR wrong number of arguments for 'getbit' command\r\n");
+}
+
+#[test]
+fn getbit_with_non_integer_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"notanumber"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+}
+
+#[test]
+fn getbit_with_negative_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"-1"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+}
+
+#[test]
+fn getbit_with_out_of_range_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GETBIT", b"bitmap", b"4294967296"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+}
+
+/// GETBIT is a read: an expired/missing key is not an error, and a replica must
+/// serve it rather than answering -READONLY.
+#[test]
+fn getbit_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"GETBIT", b"bitmap", b"0"]).expect(b":0\r\n");
+}
+
+/// GETBIT is a read: it must never reach the AOF.
+#[test]
+fn getbit_is_not_appended_to_aof() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-getbit");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SETBIT", b"bitmap", b"7", b"1"]).expect(b":0\r\n");
+    c.cmd(&[b"GETBIT", b"bitmap", b"7"]).expect(b":1\r\n");
+    c.cmd(&[b"GETBIT", b"bitmap", b"0"]).expect(b":0\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n"
+    );
+}
