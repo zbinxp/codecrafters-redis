@@ -6,7 +6,7 @@ use crate::commands::{
     cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_pexpireat, cmd_ping, cmd_psync,
     cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe,
     cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange,
-    cmd_zrank, cmd_zrem, cmd_zscore,
+    cmd_zrank, cmd_zrem, cmd_zscore,cmd_setbit,
 };
 use crate::aof::{cmd_bgrewriteaof, should_auto_rewrite};
 use crate::db::{Role, Store};
@@ -56,6 +56,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"KEYS" => Some(cmd_keys),
         b"PEXPIREAT" => Some(cmd_pexpireat),
         b"BGREWRITEAOF" => Some(cmd_bgrewriteaof),
+        b"SETBIT" => Some(cmd_setbit),
         _ => None,
     }
 }
@@ -177,6 +178,7 @@ fn is_write_command(name: &[u8]) -> bool {
         b"ZREM",
         b"XADD",
         b"PEXPIREAT",
+        b"SETBIT",
     ]
     .iter()
     .any(|c| name.eq_ignore_ascii_case(c))

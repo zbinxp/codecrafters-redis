@@ -14,6 +14,10 @@ impl RedisError {
         RedisError { message: "ERR value is not an integer or out of range".into() }
     }
 
+    pub(crate) fn field_not_integer(field: &str) -> Self {
+        RedisError { message: format!("ERR {} is not an integer or out of range", field) }
+    }
+
     pub(crate) fn invalid_expire() -> Self {
         RedisError { message: "ERR value is not an integer".into() }
     }

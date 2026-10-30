@@ -96,3 +96,49 @@ fn parse_set(args: &[Frame]) -> Result<(&[u8], &[u8], Option<Instant>), RedisErr
 
     Ok((key, value, expires_at))
 }
+
+pub fn cmd_setbit(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 4 {
+        return Err(RedisError::wrong_args("setbit"))
+    }
+    let key = bulk_at(args, 1).ok_or_else(|| RedisError::wrong_args("setbit"))?;
+    let offset_raw = bulk_at(args, 2).ok_or_else(|| RedisError::wrong_args("setbit"))?;
+    let offset:usize = util::parse(offset_raw).ok_or_else(|| RedisError::field_not_integer("bit offset"))?;
+    if offset > 0xFFFF_FFFF {
+        return Err(RedisError::field_not_integer("bit offset"))
+    }
+
+    let value_raw = bulk_at(args, 3).ok_or_else(|| RedisError::wrong_args("setbit"))?;
+    let value:u8 = util::parse(value_raw).ok_or_else(|| RedisError::field_not_integer("bit"))?;
+    if value > 1 {
+        return Err(RedisError::field_not_integer("bit"))
+    }
+    let value_bool = value == 1;
+    let byte_index = offset / 8;
+    let mask = 1 << (7 - offset % 8);
+    let Some(entry) = store.live_entry(key) else {
+        // create new value
+        let mut bytes = vec![0; byte_index+1];
+        // byte_index is guarded
+        let x = bytes.get_mut(byte_index).unwrap();
+        util::set_bit(x, mask, value_bool);
+        let entry = Entry::new(Value::String(bytes));
+        store.data.insert(key.to_vec(), entry);
+        store.touch(key);
+        return Ok(vec![Frame::Int(0)])
+    };
+
+    let Value::String(bytes) = &mut entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    if bytes.len() < byte_index + 1 {
+        bytes.resize(byte_index+1, 0);
+    }
+    // byte_index is guarded
+    let x = bytes.get_mut(byte_index).unwrap();
+    let old_x = util::get_bit(*x, mask);
+    util::set_bit(x, mask, value_bool);
+    store.touch(key);
+
+    Ok(vec![Frame::Int(old_x.into())])
+}

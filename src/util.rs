@@ -25,3 +25,15 @@ pub fn instant_to_unix_ms(inst: Instant) -> u64 {
     let ms = inst.duration_since(Instant::now()).as_millis() as u64;
     now.checked_add(ms).unwrap_or(0) 
 }
+
+pub fn set_bit(x: &mut u8, mask: u8, v: bool) {
+    *x = if v {
+        *x | mask
+    } else {
+        *x & !mask
+    };
+}
+
+pub fn get_bit(x: u8, mask: u8) -> bool {
+    x & mask != 0
+}

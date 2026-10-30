@@ -195,6 +195,7 @@ impl Client {
         assert!(
             self.buf.len() >= expected.len() && &self.buf[..expected.len()] == expected,
             "expected {:?}, buffered {:?}",
+            // expected, &self.buf,
             String::from_utf8_lossy(expected),
             String::from_utf8_lossy(&self.buf)
         );
@@ -4538,5 +4539,283 @@ fn config_get_auto_aof_rewrite_options() {
         &[b"CONFIG", b"GET", b"auto-aof-rewrite-percentage"],
         "auto-aof-rewrite-percentage",
         "100",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bitmaps (SETBIT)
+//
+// offset 0 is the MOST significant bit of byte 0, so
+//   SETBIT k 0 1 -> GET k == "\x80"
+//   SETBIT k 7 1 -> GET k == "\x01"
+// ---------------------------------------------------------------------------
+
+/// A bitmap is just a string: the first SETBIT creates a zeroed string long
+/// enough to hold the offset and reports that the old bit was 0.
+#[test]
+fn setbit_on_missing_key_returns_zero_and_sets_msb() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\x80\r\n");
+    t.client
+        .cmd(&[b"TYPE", b"bitmap"])
+        .expect(b"+string\r\n");
+}
+
+/// offset 7 is the least significant bit of the first byte.
+#[test]
+fn setbit_offset_seven_sets_lsb_of_first_byte() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"7", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\x01\r\n");
+}
+
+/// offset 8 spills into a second byte, which is zero-filled. offset 8 is the
+/// MSB of byte 1 (0x80), not its LSB -- that is offset 15.
+#[test]
+fn setbit_offset_eight_appends_a_zero_byte() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"8", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$2\r\n\x00\x80\r\n");
+}
+
+/// The reply is the PREVIOUS bit, not the new one.
+#[test]
+fn setbit_returns_previous_bit() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"3", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"3", b"1"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"3", b"0"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"3", b"0"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\x00\r\n");
+}
+
+/// Clearing one bit leaves its neighbours in the same byte alone.
+#[test]
+fn setbit_clears_only_the_targeted_bit() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"7", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\x81\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"0"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\x01\r\n");
+}
+
+/// Growing an existing string keeps its bytes and zero-fills the gap.
+#[test]
+fn setbit_extends_existing_string_with_zeros() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"bitmap", b"abc"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"31", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$4\r\nabc\x01\r\n");
+}
+
+/// A bit inside a fresh gap reads as 0 even when it is not the first byte.
+#[test]
+fn setbit_in_the_middle_of_a_gap() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"bitmap", b"a"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"23", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$3\r\na\x00\x01\r\n");
+}
+
+/// SETBIT on a non-string key is a type error, not a fresh bitmap.
+#[test]
+fn setbit_on_list_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"list", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"list", b"0", b"1"])
+        .expect(WRONGTYPE);
+}
+
+#[test]
+fn setbit_with_missing_arguments_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"1"])
+        .expect(b"-ERR wrong number of arguments for 'setbit' command\r\n");
+}
+
+#[test]
+fn setbit_with_non_integer_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"notanumber", b"1"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+}
+
+#[test]
+fn setbit_with_negative_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"-1", b"1"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+}
+
+/// Redis caps offsets at 2^32-1 (a 512 MiB string); anything larger must not be
+/// used to size an allocation.
+#[test]
+fn setbit_with_out_of_range_offset_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"4294967296", b"1"])
+        .expect(b"-ERR bit offset is not an integer or out of range\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+}
+
+/// Only 0 and 1 are accepted as the bit value.
+#[test]
+fn setbit_value_must_be_zero_or_one() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"2"])
+        .expect(b"-ERR bit is not an integer or out of range\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"abc"])
+        .expect(b"-ERR bit is not an integer or out of range\r\n");
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+}
+
+/// SETBIT modifies a live key in place, so its TTL survives.
+#[test]
+fn setbit_preserves_ttl() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"bitmap", b"v", b"PX", b"120"])
+        .expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"0", b"1"])
+        .expect(b":0\r\n");
+    // in place: 'v' (0x76) with the MSB set is 0xf6
+    t.client
+        .cmd(&[b"GET", b"bitmap"])
+        .expect(b"$1\r\n\xf6\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+}
+
+/// Creating a key with SETBIT is a modification: WATCH must see it.
+#[test]
+fn setbit_creating_a_key_invalidates_watch() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client.cmd(&[b"WATCH", b"ghost"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"other", b"1"]).expect(b"+QUEUED\r\n");
+    other
+        .cmd(&[b"SETBIT", b"ghost", b"0", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"EXEC"]).expect(b"*-1\r\n");
+    t.client.cmd(&[b"GET", b"other"]).expect(b"$-1\r\n");
+}
+
+/// SETBIT is a write: it reaches replicas verbatim and in order.
+#[test]
+fn master_propagates_setbit_to_replica() {
+    let mut t = TestCtx::new();
+    let mut repl = t.connect();
+
+    repl.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+    repl.cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+        .expect(b"+OK\r\n");
+    repl.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+    repl.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+    assert_eq!(repl.read_line(), b"$88");
+    repl.expect(EMPTY_RDB);
+
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap", b"7", b"1"])
+        .expect(b":0\r\n");
+
+    repl.expect(b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n");
+}
+
+/// SETBIT is a write: a replica must refuse it.
+#[test]
+fn setbit_on_replica_is_readonly() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"SETBIT", b"bitmap", b"0", b"1"])
+        .expect(b"-READONLY You can't write against a read only replica.\r\n");
+    // Reads are still allowed.
+    c.cmd(&[b"GET", b"bitmap"]).expect(b"$-1\r\n");
+}
+
+/// SETBIT is a write: the AOF keeps the command verbatim.
+#[test]
+fn setbit_is_appended_to_aof() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-setbit");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SETBIT", b"bitmap", b"7", b"1"]).expect(b":0\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n"
     );
 }
