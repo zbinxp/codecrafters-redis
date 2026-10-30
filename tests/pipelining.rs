@@ -5059,3 +5059,173 @@ fn get_returns_a_string_created_by_setbit() {
         .expect(b":0\r\n");
     t.client.cmd(&[b"GET", b"mykey"]).expect(b"$1\r\n@\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// STRLEN
+//
+// STRLEN counts BYTES, not bits: after SETBIT at offset n the length is
+// floor(n / 8) + 1.
+// ---------------------------------------------------------------------------
+
+/// yf6: the stage's own example -- grow a 1-byte bitmap to 2 bytes and both
+/// views agree.
+#[test]
+fn strlen_grows_with_setbit() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap_key", b"1", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"STRLEN", b"bitmap_key"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap_key", b"10", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"bitmap_key"]).expect(b"$2\r\n\x40\x20\r\n");
+    t.client
+        .cmd(&[b"STRLEN", b"bitmap_key"])
+        .expect(b":2\r\n");
+}
+
+/// Growth is `floor(offset / 8) + 1` for a fresh key, at every boundary.
+#[test]
+fn strlen_of_a_fresh_bitmap_is_floor_offset_over_eight_plus_one() {
+    let mut t = TestCtx::new();
+    for (off, len) in [
+        (0u32, 1u32),
+        (7, 1),
+        (8, 2),
+        (15, 2),
+        (16, 3),
+        (23, 3),
+        (100, 13),
+    ] {
+        let key = format!("bm{off}").into_bytes();
+        t.client
+            .cmd(&[b"SETBIT", &key, off.to_string().as_bytes(), b"1"])
+            .expect(b":0\r\n");
+        t.client
+            .cmd(&[b"STRLEN", &key])
+            .expect(format!(":{len}\r\n").as_bytes());
+    }
+}
+
+#[test]
+fn strlen_of_set_string_counts_bytes() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"hello"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"STRLEN", b"k"]).expect(b":5\r\n");
+}
+
+/// Binary-safe: embedded CRLF must not be mistaken for a frame boundary.
+#[test]
+fn strlen_is_binary_safe() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"a\r\nb"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"STRLEN", b"k"]).expect(b":4\r\n");
+}
+
+/// An empty string exists but has length 0 -- distinct from a missing key only
+/// in that GET would return "" rather than nil.
+#[test]
+fn strlen_of_empty_string_is_zero() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b""]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"STRLEN", b"k"]).expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$0\r\n\r\n");
+}
+
+/// A missing key is 0 and must not be created by the read.
+#[test]
+fn strlen_missing_key_returns_zero_without_creating_it() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"STRLEN", b"nope"]).expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"nope"]).expect(b"$-1\r\n");
+    t.client.cmd(&[b"TYPE", b"nope"]).expect(b"+none\r\n");
+}
+
+/// An expired key is 0 and is not resurrected.
+#[test]
+fn strlen_of_expired_key_returns_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"abc", b"PX", b"120"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"STRLEN", b"k"]).expect(b":3\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"STRLEN", b"k"]).expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}
+
+/// Any non-string type is WRONGTYPE, not 0.
+#[test]
+fn strlen_of_non_string_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"list", b"a"]).expect(b":1\r\n");
+    t.client.cmd(&[b"STRLEN", b"list"]).expect(WRONGTYPE);
+    t.client
+        .cmd(&[b"ZADD", b"zset", b"1", b"m"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"STRLEN", b"zset"]).expect(WRONGTYPE);
+}
+
+#[test]
+fn strlen_with_missing_arguments_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"STRLEN"])
+        .expect(b"-ERR wrong number of arguments for 'strlen' command\r\n");
+    t.client
+        .cmd(&[b"STRLEN", b"k", b"extra"])
+        .expect(b"-ERR wrong number of arguments for 'strlen' command\r\n");
+}
+
+/// STRLEN is a read: replicas serve it, and it never reaches the AOF.
+#[test]
+fn strlen_is_a_read_command() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-strlen");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SETBIT", b"bitmap", b"7", b"1"]).expect(b":0\r\n");
+    c.cmd(&[b"STRLEN", b"bitmap"]).expect(b":1\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n",
+        "STRLEN must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn strlen_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"STRLEN", b"bitmap"]).expect(b":0\r\n");
+}

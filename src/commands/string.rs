@@ -157,16 +157,30 @@ pub fn cmd_getbit(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
     let Some(entry) = store.live_entry(key) else {
         return Ok(vec![Frame::Int(0)])
     };
-    let Value::String(bytes) = &mut entry.value else {
+    let Value::String(bytes) = &entry.value else {
         return Err(RedisError::wrong_type())
     };
     let (byte_index, mask) = byte_and_mask(offset);
     if byte_index >= bytes.len() {
         return Ok(vec![Frame::Int(0)])
     }
-    let x = bytes.get_mut(byte_index).unwrap();
-    let bit = util::get_bit(*x, mask);
+    let x = bytes[byte_index];
+    let bit = util::get_bit(x, mask);
     Ok(vec![Frame::Int(bit.into())])
+}
+
+pub fn cmd_strlen(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 2 {
+        return Err(RedisError::wrong_args("strlen"));
+    }
+    let key = bulk_at(args, 1).ok_or_else(|| RedisError::wrong_args("strlen"))?;
+    let Some(entry) = store.live_entry(key) else {
+        return Ok(vec![Frame::Int(0)])
+    };
+    let Value::String(bytes) = &entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    Ok(vec![Frame::Int(bytes.len() as i64)])
 }
 
 fn byte_and_mask(offset:usize) -> (usize, u8) {
