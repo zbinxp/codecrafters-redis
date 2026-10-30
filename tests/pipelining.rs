@@ -5229,3 +5229,228 @@ fn strlen_is_allowed_on_replica() {
     let mut c = Client::connect_to(&replica_addr);
     c.cmd(&[b"STRLEN", b"bitmap"]).expect(b":0\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// BITCOUNT [start end]
+//
+// start/end are BYTE indexes, inclusive. "abc" is 0x61 0x62 0x63, popcounts
+// 3, 3, 4.
+// ---------------------------------------------------------------------------
+
+/// nx3: the stage's own example -- 0x40 0x20 has one bit per byte.
+#[test]
+fn bitcount_counts_the_whole_string() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bitmap_key", b"1", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"bitmap_key", b"10", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"bitmap_key"])
+        .expect(b":2\r\n")
+        .cmd(&[b"BITCOUNT", b"bitmap_key", b"0", b"0"])
+        .expect(b":1\r\n")
+        .cmd(&[b"BITCOUNT", b"bitmap_key", b"1", b"1"])
+        .expect(b":1\r\n")
+        .cmd(&[b"BITCOUNT", b"bitmap_key", b"0", b"1"])
+        .expect(b":2\r\n");
+}
+
+/// A range is inclusive on both ends and counts bytes, not bits.
+#[test]
+fn bitcount_with_a_byte_range() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"abc"]).expect(b"+OK\r\n");
+    for (start, end, expected) in [
+        ("0", "0", ":3\r\n"),
+        ("1", "1", ":3\r\n"),
+        ("2", "2", ":4\r\n"),
+        ("0", "1", ":6\r\n"),
+        ("1", "2", ":7\r\n"),
+        ("0", "2", ":10\r\n"),
+    ] {
+        t.client
+            .cmd(&[b"BITCOUNT", b"k", start.as_bytes(), end.as_bytes()])
+            .expect(expected.as_bytes());
+    }
+}
+
+/// end past the end is clamped to the last byte; start at/after the end is 0.
+#[test]
+fn bitcount_clamps_indexes_to_the_string() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"abc"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"k", b"0", b"100"])
+        .expect(b":10\r\n")
+        .cmd(&[b"BITCOUNT", b"k", b"2", b"100"])
+        .expect(b":4\r\n")
+        .cmd(&[b"BITCOUNT", b"k", b"5", b"100"])
+        .expect(b":0\r\n")
+        // start == len is past the end, not a valid index
+        .cmd(&[b"BITCOUNT", b"k", b"3", b"3"])
+        .expect(b":0\r\n")
+        .cmd(&[b"BITCOUNT", b"k", b"3", b"100"])
+        .expect(b":0\r\n")
+        .cmd(&[b"BITCOUNT", b"k", b"2", b"1"])
+        .expect(b":0\r\n");
+    // ...and the key is untouched by all of that
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$3\r\nabc\r\n");
+}
+
+/// Totals for values that came in through SET: popcount is over the same bytes.
+#[test]
+fn bitcount_of_set_strings() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"A", b"A"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"hi", b"hello"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"z", b"\x00"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"o", b"\xff"]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"A"]).expect(b":2\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"hi"]).expect(b":21\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"z"]).expect(b":0\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"o"]).expect(b":8\r\n");
+}
+
+/// The empty string exists and has no bits; a missing key is 0 too.
+#[test]
+fn bitcount_of_empty_and_missing_keys() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"empty", b""]).expect(b"+OK\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"empty"]).expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"empty", b"0", b"0"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"nope"]).expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"nope", b"0", b"100"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"nope"]).expect(b"$-1\r\n");
+}
+
+/// A grown bitmap counts only the bits that were actually set.
+#[test]
+fn bitcount_of_a_grown_bitmap() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"bm", b"100", b"1"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"STRLEN", b"bm"]).expect(b":13\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"bm"])
+        .expect(b":1\r\n")
+        // offset 100 is inside byte 12
+        .cmd(&[b"BITCOUNT", b"bm", b"12", b"12"])
+        .expect(b":1\r\n")
+        .cmd(&[b"BITCOUNT", b"bm", b"11", b"11"])
+        .expect(b":0\r\n")
+        .cmd(&[b"BITCOUNT", b"bm", b"0", b"11"])
+        .expect(b":0\r\n");
+}
+
+/// An expired key counts as absent.
+#[test]
+fn bitcount_of_expired_key_is_zero() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k", b"\xff", b"PX", b"120"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"k"]).expect(b":8\r\n");
+    sleep(Duration::from_millis(200));
+    t.client.cmd(&[b"BITCOUNT", b"k"]).expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"k"]).expect(b"$-1\r\n");
+}
+
+#[test]
+fn bitcount_of_non_string_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"RPUSH", b"list", b"a"]).expect(b":1\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"list"]).expect(WRONGTYPE);
+    t.client
+        .cmd(&[b"BITCOUNT", b"list", b"0", b"0"])
+        .expect(WRONGTYPE);
+    t.client
+        .cmd(&[b"ZADD", b"zset", b"1", b"m"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"BITCOUNT", b"zset"]).expect(WRONGTYPE);
+}
+
+/// No arguments is an arity error; a lone start with no end is a syntax error.
+#[test]
+fn bitcount_arity_and_syntax_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BITCOUNT"])
+        .expect(b"-ERR wrong number of arguments for 'bitcount' command\r\n");
+    t.client.cmd(&[b"SET", b"k", b"abc"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"k", b"0"])
+        .expect(b"-ERR syntax error\r\n");
+}
+
+/// Indexes must be integers; the key is inspected first, so a missing key is
+/// still 0 even with junk indexes.
+#[test]
+fn bitcount_with_non_integer_index_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"k", b"abc"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"k", b"abc", b"1"])
+        .expect(b"-ERR value is not an integer or out of range\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"k", b"0", b"abc"])
+        .expect(b"-ERR value is not an integer or out of range\r\n");
+    t.client
+        .cmd(&[b"BITCOUNT", b"nope", b"abc", b"1"])
+        .expect(b":0\r\n");
+}
+
+/// BITCOUNT is a read: replicas serve it, and it never reaches the AOF.
+#[test]
+fn bitcount_is_a_read_command() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-bitcount");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SETBIT", b"bitmap", b"7", b"1"]).expect(b":0\r\n");
+    c.cmd(&[b"BITCOUNT", b"bitmap"]).expect(b":1\r\n");
+    c.cmd(&[b"BITCOUNT", b"bitmap", b"0", b"0"]).expect(b":1\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*4\r\n$6\r\nSETBIT\r\n$6\r\nbitmap\r\n$1\r\n7\r\n$1\r\n1\r\n",
+        "BITCOUNT must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn bitcount_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"BITCOUNT", b"bitmap"]).expect(b":0\r\n");
+}

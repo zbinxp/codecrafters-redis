@@ -183,6 +183,41 @@ pub fn cmd_strlen(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
     Ok(vec![Frame::Int(bytes.len() as i64)])
 }
 
+/// BITCOUNT key [start end]
+/// start,end are byte indexes
+pub fn cmd_bitcount(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() < 2 && args.len() > 4 {
+        return Err(RedisError::wrong_args("bitcount"))
+    }
+    let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("bitcount"))?;
+    let Some(entry) = store.live_entry(key) else {
+        return Ok(vec![Frame::Int(0)])
+    };
+    let Value::String(bytes) = &entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    if bytes.len() == 0 {
+        return Ok(vec![Frame::Int(0)])
+    }
+    match (bulk_at(args, 2), bulk_at(args, 3)) {
+        (Some(start_raw), Some(end_raw)) => {
+            let start = util::parse::<usize>(start_raw).ok_or_else(||RedisError::not_integer())?;
+            let end = util::parse::<usize>(end_raw).ok_or_else(||RedisError::not_integer())?;
+            if start > end || start >= bytes.len() {
+                return Ok(vec![Frame::Int(0)])
+            }
+            let end = end.min(bytes.len()-1);
+            let count = bytes[start..=end].iter().map(|b|b.count_ones()).sum::<u32>() as i64;
+            Ok(vec![Frame::Int(count)])
+        },
+        (None, None) => {
+            let count = bytes.iter().map(|b| b.count_ones()).sum::<u32>() as i64;
+            Ok(vec![Frame::Int(count)])
+        },
+        _ => return Err(RedisError::syntax_error())
+    }
+}
+
 fn byte_and_mask(offset:usize) -> (usize, u8) {
     let byte_index = offset / 8;
     let mask = 1 << (7 - offset % 8);

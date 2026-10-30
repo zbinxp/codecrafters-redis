@@ -6,7 +6,7 @@ use crate::commands::{
     cmd_llen, cmd_lpop, cmd_lpush, cmd_lrange, cmd_multi, cmd_pexpireat, cmd_ping, cmd_psync,
     cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe,
     cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange,
-    cmd_zrank, cmd_zrem, cmd_zscore, cmd_setbit, cmd_getbit, cmd_strlen,
+    cmd_zrank, cmd_zrem, cmd_zscore, cmd_setbit, cmd_getbit, cmd_strlen, cmd_bitcount,
 };
 use crate::aof::{cmd_bgrewriteaof, should_auto_rewrite};
 use crate::db::{Role, Store};
@@ -59,6 +59,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"SETBIT" => Some(cmd_setbit),
         b"GETBIT" => Some(cmd_getbit),
         b"STRLEN" => Some(cmd_strlen),
+        b"BITCOUNT" => Some(cmd_bitcount),
         _ => None,
     }
 }
