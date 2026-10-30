@@ -186,8 +186,10 @@ pub fn cmd_strlen(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
 /// BITCOUNT key [start end]
 /// start,end are byte indexes
 pub fn cmd_bitcount(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
-    if args.len() < 2 && args.len() > 4 {
-        return Err(RedisError::wrong_args("bitcount"))
+    match args.len() {
+       2 | 4 => {}
+       1 => return Err(RedisError::wrong_args("bitcount")),
+       _ => return Err(RedisError::syntax_error()),
     }
     let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("bitcount"))?;
     let Some(entry) = store.live_entry(key) else {
