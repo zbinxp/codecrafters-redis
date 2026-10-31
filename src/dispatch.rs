@@ -7,6 +7,7 @@ use crate::commands::{
     cmd_publish, cmd_replconf, cmd_rpush, cmd_set, cmd_subscribe, cmd_type, cmd_unsubscribe,
     cmd_unwatch, cmd_watch, cmd_xadd, cmd_xrange, cmd_xread, cmd_zadd, cmd_zcard, cmd_zrange,
     cmd_zrank, cmd_zrem, cmd_zscore, cmd_setbit, cmd_getbit, cmd_strlen, cmd_bitcount, cmd_bitop,
+    cmd_geoadd,
 };
 use crate::aof::{cmd_bgrewriteaof, should_auto_rewrite};
 use crate::db::{Role, Store};
@@ -61,6 +62,7 @@ pub fn lookup(name: &[u8]) -> Option<Handler> {
         b"STRLEN" => Some(cmd_strlen),
         b"BITCOUNT" => Some(cmd_bitcount),
         b"BITOP" => Some(cmd_bitop),
+        b"GEOADD" => Some(cmd_geoadd),
         _ => None,
     }
 }
@@ -184,6 +186,7 @@ fn is_write_command(name: &[u8]) -> bool {
         b"PEXPIREAT",
         b"SETBIT",
         b"BITOP",
+        b"GEOADD",
     ]
     .iter()
     .any(|c| name.eq_ignore_ascii_case(c))

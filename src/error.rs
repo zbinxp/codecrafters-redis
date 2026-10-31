@@ -26,6 +26,10 @@ impl RedisError {
         RedisError { message: "ERR value is not a valid float".into() }
     }
 
+    pub(crate) fn invalid_longitude_latitude(lon:f64, lat:f64) -> Self {
+        RedisError { message: format!("ERR invalid longitude,latitude pair {:.6},{:.6}", lon, lat) }
+    }
+
     pub(crate) fn timeout_not_float() -> Self {
         RedisError { message: "ERR timeout is not a float or out of range".into() }
     }

@@ -5780,3 +5780,279 @@ fn bitop_or_over_equal_and_different_lengths() {
         .cmd(&[b"GET", b"dest"])
         .expect(b"$2\r\n\x8a\x01\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// GEOADD
+//
+// Locations live in the same sorted set as ZADD; the score is the 52-bit
+// geohash of (lat, lon) with latitude in the even bits.
+// ---------------------------------------------------------------------------
+
+/// zt4: the reply is the number of NEW members, not a constant.
+#[test]
+fn geoadd_returns_the_number_of_members_added() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"11.5030378", b"48.164271", b"Munich"])
+        .expect(b":1\r\n")
+        // same member, new coordinates: updated, not added
+        .cmd(&[b"GEOADD", b"places", b"11.6", b"48.2", b"Munich"])
+        .expect(b":0\r\n")
+        // one command may carry several triples; two of them are new
+        .cmd(&[b"GEOADD", b"places", b"13.361389", b"38.115556", b"Palermo",
+               b"15.087269", b"37.502669", b"Catania"])
+        .expect(b":2\r\n")
+        .cmd(&[b"ZCARD", b"places"])
+        .expect(b":3\r\n");
+}
+
+/// tn5: the location is stored in a sorted set, visible to the zset commands.
+#[test]
+fn geoadd_stores_the_location_in_a_sorted_set() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZRANGE", b"places", b"0", b"-1"])
+        .expect(b"*1\r\n$5\r\nParis\r\n")
+        .cmd(&[b"ZRANK", b"places", b"Paris"])
+        .expect(b":0\r\n")
+        .cmd(&[b"TYPE", b"places"])
+        .expect(b"+zset\r\n");
+}
+
+/// cr3: scores are the geohash of the coordinates (lat in the even bits).
+#[test]
+fn geoadd_scores_match_the_geohash() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GEOADD", b"places", b"13.361389", b"38.115556", b"Palermo"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"ZSCORE", b"places", b"Paris"])
+        .expect(b"$16\r\n3663832614298053\r\n")
+        .cmd(&[b"ZSCORE", b"places", b"Palermo"])
+        .expect(b"$16\r\n3479099956230698\r\n");
+}
+
+/// Re-adding a member moves it to the new score without duplicating it.
+#[test]
+fn geoadd_updates_an_existing_member() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GEOADD", b"places", b"13.361389", b"38.115556", b"Paris"])
+        .expect(b":0\r\n")
+        .cmd(&[b"ZCARD", b"places"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZSCORE", b"places", b"Paris"])
+        .expect(b"$16\r\n3479099956230698\r\n");
+}
+
+/// ck3: -- and the boundaries themselves are accepted.
+#[test]
+fn geoadd_accepts_boundary_coordinates() {
+    let mut t = TestCtx::new();
+    for (i, (lon, lat)) in [
+        ("180", "85.05112878"),
+        ("-180", "-85.05112878"),
+        ("180", "-85.05112878"),
+        ("-180", "85.05112878"),
+        ("0", "0"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let member = format!("m{i}");
+        t.client
+            .cmd(&[
+                b"GEOADD",
+                b"edges",
+                lon.as_bytes(),
+                lat.as_bytes(),
+                member.as_bytes(),
+            ])
+            .expect(b":1\r\n");
+    }
+    t.client.cmd(&[b"ZCARD", b"edges"]).expect(b":5\r\n");
+}
+
+/// ck3: out-of-range values are rejected with an ERR mentioning the bad axis.
+#[test]
+fn geoadd_rejects_out_of_range_coordinates() {
+    let mut t = TestCtx::new();
+    for (lon, lat, word) in [
+        ("181", "0.3", "longitude"),
+        ("-181", "0.3", "longitude"),
+        ("180", "90", "latitude"),
+        ("180", "-90", "latitude"),
+    ] {
+        let line = {
+            t.client.cmd(&[
+                b"GEOADD",
+                b"places",
+                lon.as_bytes(),
+                lat.as_bytes(),
+                b"bad",
+            ]);
+            t.client.read_line()
+        };
+        let line = String::from_utf8_lossy(&line).to_string();
+        assert!(
+            line.starts_with("-ERR"),
+            "expected an ERR reply for {lon},{lat}, got {line:?}"
+        );
+        assert!(
+            line.contains(word),
+            "expected {word:?} in the error for {lon},{lat}, got {line:?}"
+        );
+    }
+    // nothing was stored
+    t.client.cmd(&[b"ZCARD", b"places"]).expect(b":0\r\n");
+}
+
+/// A rejected GEOADD must not create the key at all.
+#[test]
+fn geoadd_invalid_coordinates_do_not_create_the_key() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"200", b"100", b"foo"])
+        .expect_prefix(b"-ERR");
+    t.client.cmd(&[b"TYPE", b"places"]).expect(b"+none\r\n");
+}
+
+/// A bad triple anywhere in the command aborts the whole GEOADD: the valid
+/// triples before it must not be stored.
+#[test]
+fn geoadd_is_not_partially_applied() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[
+            b"GEOADD", b"places",
+            b"13.361389", b"38.115556", b"Palermo",
+            b"200", b"100", b"bad",
+        ])
+        .expect_prefix(b"-ERR");
+    t.client
+        .cmd(&[b"ZRANGE", b"places", b"0", b"-1"])
+        .expect(b"*0\r\n");
+    t.client.cmd(&[b"TYPE", b"places"]).expect(b"+none\r\n");
+}
+
+#[test]
+fn geoadd_on_non_zset_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"str", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"GEOADD", b"str", b"1", b"1", b"m"])
+        .expect(WRONGTYPE);
+    // the string is untouched
+    t.client.cmd(&[b"GET", b"str"]).expect(b"$1\r\nv\r\n");
+}
+
+/// Argument count must be `key + 3n`; junk coordinates are float errors.
+#[test]
+fn geoadd_argument_errors() {
+    let mut t = TestCtx::new();
+    for cmd in [
+        vec![b"GEOADD".as_slice()],
+        vec![b"GEOADD", b"places"],
+        vec![b"GEOADD", b"places", b"1", b"2"],
+        vec![b"GEOADD", b"places", b"1", b"2", b"m", b"3"],
+    ] {
+        t.client
+            .cmd(&cmd)
+            .expect(b"-ERR wrong number of arguments for 'geoadd' command\r\n");
+    }
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"abc", b"0", b"m"])
+        .expect(b"-ERR value is not a valid float\r\n");
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"inf", b"0", b"m"])
+        .expect(b"-ERR value is not a valid float\r\n");
+}
+
+/// GEOADD is a write command: AOF, replication, READONLY gate.
+#[test]
+fn geoadd_is_a_write_command() {
+    let mut t = TestCtx::new();
+    let mut repl = t.connect();
+    repl.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+    repl.cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+        .expect(b"+OK\r\n");
+    repl.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+    repl.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+    assert_eq!(repl.read_line(), b"$88");
+    repl.expect(EMPTY_RDB);
+
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n");
+    repl.expect(
+        b"*5\r\n$6\r\nGEOADD\r\n$6\r\nplaces\r\n$9\r\n2.2944692\r\n$10\r\n48.8584625\r\n$5\r\nParis\r\n",
+    );
+}
+
+#[test]
+fn geoadd_on_a_replica_is_readonly() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"GEOADD", b"places", b"1", b"1", b"m"])
+        .expect(b"-READONLY You can't write against a read only replica.\r\n");
+}
+
+#[test]
+fn geoadd_is_appended_to_aof() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-geoadd");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GEOADD", b"places", b"1", b"1", b"m"])
+        .expect(b":1\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*5\r\n$6\r\nGEOADD\r\n$6\r\nplaces\r\n$1\r\n1\r\n$1\r\n1\r\n$1\r\nm\r\n".to_vec(),
+        "GEOADD must be appended to the AOF"
+    );
+}
+
+/// The same member twice in one GEOADD: counted once, last score wins.
+#[test]
+fn geoadd_counts_a_repeated_member_once() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"1", b"1", b"m", b"2", b"2", b"m"])
+        .expect(b":1\r\n")
+        .cmd(&[b"ZCARD", b"places"])
+        .expect(b":1\r\n")
+        // the second triple wins: geohash of (lat 2, lon 2)
+        .cmd(&[b"ZSCORE", b"places", b"m"])
+        .expect(b"$16\r\n3378191666521995\r\n");
+}

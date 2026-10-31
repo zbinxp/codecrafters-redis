@@ -6,6 +6,7 @@ mod string;
 mod zset;
 mod transaction;
 mod server;
+mod geo;
 
 use std::cmp::min;
 
@@ -46,6 +47,8 @@ pub use zset::cmd_zrange;
 pub use zset::cmd_zrank;
 pub use zset::cmd_zrem;
 pub use zset::cmd_zscore;
+
+pub use geo::cmd_geoadd;
 
 pub use pubsub::cmd_publish;
 pub use pubsub::cmd_subscribe;

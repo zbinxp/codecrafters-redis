@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-
 pub(crate) fn parse<T: std::str::FromStr>(bytes: &[u8]) -> Option<T> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
 }
