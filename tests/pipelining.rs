@@ -5454,3 +5454,329 @@ fn bitcount_is_allowed_on_replica() {
     let mut c = Client::connect_to(&replica_addr);
     c.cmd(&[b"BITCOUNT", b"bitmap"]).expect(b":0\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// BITOP AND / OR
+//
+// The reply is the destination's length in bytes. Shorter sources are
+// zero-padded to the longest; a missing key is all zeros.
+// ---------------------------------------------------------------------------
+
+/// hv4: the stage example -- 10001000 AND 10000010 == 10000000.
+#[test]
+fn bitop_and_over_equal_lengths() {
+    let mut t = TestCtx::new();
+    for (key, off) in [("key1", 0), ("key1", 4), ("key2", 0), ("key2", 6)] {
+        t.client
+            .cmd(&[b"SETBIT", key.as_bytes(), off.to_string().as_bytes(), b"1"])
+            .expect(b":0\r\n");
+    }
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"key2"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"GET", b"dest"])
+        .expect(b"$1\r\n\x80\r\n")
+        .cmd(&[b"GETBIT", b"dest", b"0"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GETBIT", b"dest", b"4"])
+        .expect(b":0\r\n")
+        .cmd(&[b"GETBIT", b"dest", b"6"])
+        .expect(b":0\r\n");
+}
+
+/// dk2: the destination is as long as the LONGEST source; the shorter one is
+/// zero-padded, so bits past its end always clear.
+#[test]
+fn bitop_and_over_different_lengths() {
+    let mut t = TestCtx::new();
+    for (key, off) in [("key1", 1), ("key1", 10), ("key2", 1)] {
+        t.client
+            .cmd(&[b"SETBIT", key.as_bytes(), off.to_string().as_bytes(), b"1"])
+            .expect(b":0\r\n");
+    }
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"key2"])
+        .expect(b":2\r\n");
+    t.client
+        .cmd(&[b"GET", b"dest"])
+        .expect(b"$2\r\n\x40\x00\r\n")
+        .cmd(&[b"STRLEN", b"dest"])
+        .expect(b":2\r\n")
+        .cmd(&[b"GETBIT", b"dest", b"1"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GETBIT", b"dest", b"10"])
+        .expect(b":0\r\n");
+}
+
+/// A missing source is zeros over the whole destination length.
+#[test]
+fn bitop_and_with_a_missing_source_is_all_zeros() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"key1", b"1", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"key1", b"10", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"nope"])
+        .expect(b":2\r\n");
+    t.client
+        .cmd(&[b"GET", b"dest"])
+        .expect(b"$2\r\n\x00\x00\r\n");
+}
+
+/// With every source missing the result is empty, so the destination key is
+/// deleted instead of being stored as an empty string.
+#[test]
+fn bitop_and_with_no_sources_deletes_the_destination() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"dest", b"stale"])
+        .expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"nope1", b"nope2"])
+        .expect(b":0\r\n");
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$-1\r\n");
+    t.client.cmd(&[b"TYPE", b"dest"]).expect(b"+none\r\n");
+}
+
+/// An empty string source behaves like a missing one.
+#[test]
+fn bitop_and_with_an_empty_string_source() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"empty", b""]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"key1", b"7", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"empty"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$1\r\n\x00\r\n");
+}
+
+/// The destination is replaced, not merged: old bytes past the new length go
+/// away and the old TTL is dropped.
+#[test]
+fn bitop_and_overwrites_the_destination_and_clears_its_ttl() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"dest", b"0123456789", b"PX", b"200"])
+        .expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"key1", b"7", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"key2", b"7", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"key2"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"STRLEN", b"dest"]).expect(b":1\r\n");
+    sleep(Duration::from_millis(300));
+    // still there: BITOP wrote a fresh value without the old expiry
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$1\r\n\x01\r\n");
+}
+
+/// The destination may be one of the sources.
+#[test]
+fn bitop_and_accepts_the_destination_as_a_source() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SETBIT", b"dest", b"0", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"dest", b"1", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"key2", b"0", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"dest", b"key2"])
+        .expect(b":1\r\n");
+    t.client
+        .cmd(&[b"GET", b"dest"])
+        .expect(b"$1\r\n\x80\r\n");
+}
+
+/// Any number of sources, including just one.
+#[test]
+fn bitop_and_accepts_one_or_three_sources() {
+    let mut t = TestCtx::new();
+    for (key, off) in [("k1", 0), ("k1", 1), ("k2", 0), ("k2", 2), ("k3", 0)] {
+        t.client
+            .cmd(&[b"SETBIT", key.as_bytes(), off.to_string().as_bytes(), b"1"])
+            .expect(b":0\r\n");
+    }
+    // one source: a copy
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"copy", b"k1"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"copy"]).expect(b"$1\r\n\xc0\r\n");
+    // three sources: 11000000 & 10100000 & 10000000 == 10000000
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"k1", b"k2", b"k3"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$1\r\n\x80\r\n");
+}
+
+/// A wrong-typed source is an error and must leave the destination alone.
+#[test]
+fn bitop_and_with_a_non_string_source_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"dest", b"keep"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"RPUSH", b"list", b"a"]).expect(b":1\r\n");
+    t.client
+        .cmd(&[b"SETBIT", b"key1", b"7", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"key1", b"list"])
+        .expect(WRONGTYPE);
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$4\r\nkeep\r\n");
+}
+
+#[test]
+fn bitop_rejects_unknown_operations() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BITOP", b"NAND", b"dest", b"k1", b"k2"])
+        .expect(b"-ERR syntax error\r\n");
+    // ...and the operation name is case-insensitive
+    t.client
+        .cmd(&[b"SETBIT", b"k1", b"0", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"and", b"dest", b"k1", b"k1"])
+        .expect(b":1\r\n");
+}
+
+#[test]
+fn bitop_with_too_few_arguments_is_rejected() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest"])
+        .expect(b"-ERR wrong number of arguments for 'bitop' command\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"AND"])
+        .expect(b"-ERR wrong number of arguments for 'bitop' command\r\n");
+}
+
+/// An expired source counts as missing, i.e. zeros.
+#[test]
+fn bitop_and_with_an_expired_source() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"SET", b"k1", b"\xff", b"PX", b"120"])
+        .expect(b"+OK\r\n");
+    t.client.cmd(&[b"SET", b"k2", b"\xff"]).expect(b"+OK\r\n");
+    sleep(Duration::from_millis(200));
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"k1", b"k2"])
+        .expect(b":1\r\n");
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$1\r\n\x00\r\n");
+}
+
+/// BITOP is a write command: it must reach the AOF verbatim.
+#[test]
+fn bitop_is_appended_to_aof() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-bitop");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SETBIT", b"k1", b"0", b"1"]).expect(b":0\r\n");
+    c.cmd(&[b"SETBIT", b"k2", b"0", b"1"]).expect(b":0\r\n");
+    c.cmd(&[b"BITOP", b"AND", b"dest", b"k1", b"k2"])
+        .expect(b":1\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    let expected = b"*4\r\n$6\r\nSETBIT\r\n$2\r\nk1\r\n$1\r\n0\r\n$1\r\n1\r\n\
+                     *4\r\n$6\r\nSETBIT\r\n$2\r\nk2\r\n$1\r\n0\r\n$1\r\n1\r\n\
+                     *5\r\n$5\r\nBITOP\r\n$3\r\nAND\r\n$4\r\ndest\r\n$2\r\nk1\r\n$2\r\nk2\r\n";
+    assert_eq!(
+        got,
+        expected.to_vec(),
+        "BITOP must be appended to the AOF"
+    );
+}
+
+/// BITOP is propagated to replicas verbatim and refused on a replica.
+#[test]
+fn bitop_is_a_write_command_for_replication() {
+    let mut t = TestCtx::new();
+    let mut repl = t.connect();
+    repl.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+    repl.cmd(&[b"REPLCONF", b"listening-port", b"6380"])
+        .expect(b"+OK\r\n");
+    repl.cmd(&[b"REPLCONF", b"capa", b"psync2"]).expect(b"+OK\r\n");
+    repl.cmd(&[b"PSYNC", b"?", b"-1"]).expect_prefix(b"+FULLRESYNC");
+    assert_eq!(repl.read_line(), b"$88");
+    repl.expect(EMPTY_RDB);
+
+    t.client
+        .cmd(&[b"SETBIT", b"k1", b"0", b"1"])
+        .expect(b":0\r\n")
+        .cmd(&[b"SETBIT", b"k2", b"0", b"1"])
+        .expect(b":0\r\n");
+    repl.expect(b"*4\r\n$6\r\nSETBIT\r\n$2\r\nk1\r\n$1\r\n0\r\n$1\r\n1\r\n");
+    repl.expect(b"*4\r\n$6\r\nSETBIT\r\n$2\r\nk2\r\n$1\r\n0\r\n$1\r\n1\r\n");
+
+    t.client
+        .cmd(&[b"BITOP", b"AND", b"dest", b"k1", b"k2"])
+        .expect(b":1\r\n");
+    repl.expect(b"*5\r\n$5\r\nBITOP\r\n$3\r\nAND\r\n$4\r\ndest\r\n$2\r\nk1\r\n$2\r\nk2\r\n");
+}
+
+#[test]
+fn bitop_on_a_replica_is_readonly() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"BITOP", b"AND", b"dest", b"k1", b"k2"])
+        .expect(b"-READONLY You can't write against a read only replica.\r\n");
+}
+
+/// fr8: OR is the same shape with a different fold.
+#[test]
+fn bitop_or_over_equal_and_different_lengths() {
+    let mut t = TestCtx::new();
+    for (key, off) in [("k1", 0), ("k1", 4), ("k2", 0), ("k2", 6)] {
+        t.client
+            .cmd(&[b"SETBIT", key.as_bytes(), off.to_string().as_bytes(), b"1"])
+            .expect(b":0\r\n");
+    }
+    t.client
+        .cmd(&[b"BITOP", b"OR", b"dest", b"k1", b"k2"])
+        .expect(b":1\r\n");
+    // 10001000 | 10000010 == 10001010
+    t.client.cmd(&[b"GET", b"dest"]).expect(b"$1\r\n\x8a\r\n");
+    // a longer second source wins the length
+    t.client
+        .cmd(&[b"SETBIT", b"k3", b"15", b"1"])
+        .expect(b":0\r\n");
+    t.client
+        .cmd(&[b"BITOP", b"OR", b"dest", b"dest", b"k3"])
+        .expect(b":2\r\n");
+    t.client
+        .cmd(&[b"GET", b"dest"])
+        .expect(b"$2\r\n\x8a\x01\r\n");
+}

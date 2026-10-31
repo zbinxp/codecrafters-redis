@@ -31,6 +31,7 @@ pub use string::cmd_setbit;
 pub use string::cmd_getbit;
 pub use string::cmd_strlen;
 pub use string::cmd_bitcount;
+pub use string::cmd_bitop;
 
 pub use list::blpop;
 pub use list::cmd_llen;

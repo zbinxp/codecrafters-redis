@@ -110,6 +110,19 @@ impl Db {
         self.data.get_mut(key)
     }
 
+    pub fn live_entry_readonly(&mut self, key: &[u8]) -> Option<&Entry> {
+        if self
+            .data
+            .get(key)
+            .and_then(|e| e.expires_at)
+            .is_some_and(|t| t <= Instant::now())
+        {
+            self.data.remove(key);
+            self.touch(key);
+        }
+        self.data.get(key)
+    }
+
     pub fn readonly_entry<'a>(data: &'a HashMap<Vec<u8>, Entry>, key: &[u8]) -> Option<&'a Entry> {
         if data
             .get(key)

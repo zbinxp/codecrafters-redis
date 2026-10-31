@@ -220,6 +220,91 @@ pub fn cmd_bitcount(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdR
     }
 }
 
+#[derive(Clone, Copy)]
+enum BitOp {
+    And,
+    Or,
+}
+
+impl BitOp {
+    /// Redis matches the operation name case-insensitively.
+    fn parse(name: &[u8]) -> Option<Self> {
+        if name.eq_ignore_ascii_case(b"AND") {
+            Some(BitOp::And)
+        } else if name.eq_ignore_ascii_case(b"OR") {
+            Some(BitOp::Or)
+        } else {
+            None
+        }
+    }
+
+    fn apply(self, acc: u8, byte: u8) -> u8 {
+        match self {
+            BitOp::And => acc & byte,
+            BitOp::Or => acc | byte,
+        }
+    }
+
+    /// Identity for the fold: all ones for AND, all zeros for OR.
+    fn identity(self) -> u8 {
+        match self {
+            BitOp::And => 0xFF,
+            BitOp::Or => 0x00,
+        }
+    }
+}
+
+/// BITOP <AND|OR> dest key [key ...]
+///
+/// The destination is as long as the longest source; shorter sources and
+/// missing keys read as zero bytes. Replies with the destination length in
+/// bytes, or 0 after deleting an empty destination.
+pub fn cmd_bitop(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() < 4 {
+        return Err(RedisError::wrong_args("bitop"))
+    }
+    let op = bulk_at(args, 1)
+        .and_then(BitOp::parse)
+        .ok_or_else(RedisError::syntax_error)?;
+    let dest = bulk_at(args, 2).ok_or_else(||RedisError::wrong_args("bitop"))?;
+
+    // Read every source before touching `dest`: it may be one of them, and a
+    // wrong-typed source must leave `dest` exactly as it was.
+    let mut inputs: Vec<Vec<u8>> = Vec::with_capacity(args.len() - 3);
+    for frame in &args[3..] {
+        let key = frame.as_bulk().ok_or_else(||RedisError::wrong_args("bitop"))?;
+        // expired or missing key => zero bytes
+        match store.live_entry_readonly(key) {
+            Some(entry) => match &entry.value {
+                Value::String(bytes) => inputs.push(bytes.clone()),
+                _ => return Err(RedisError::wrong_type())
+            },
+            None => inputs.push(Vec::new()),
+        }
+    }
+
+    let maxlen = inputs.iter().map(Vec::len).max().unwrap_or(0);
+    let mut out = vec![0u8; maxlen];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = inputs
+            .iter()
+            .fold(op.identity(), |acc, bytes| op.apply(acc, bytes.get(i).copied().unwrap_or(0)));
+    }
+
+    if out.is_empty() {
+        // Redis deletes the destination rather than storing an empty string.
+        if store.data.remove(dest).is_some() {
+            store.touch(dest);
+        }
+        Ok(vec![Frame::Int(0)])
+    } else {
+        let len = out.len() as i64;
+        store.data.insert(dest.to_vec(), Entry::new(Value::String(out)));
+        store.touch(dest);
+        Ok(vec![Frame::Int(len)])
+    }
+}
+
 fn byte_and_mask(offset:usize) -> (usize, u8) {
     let byte_index = offset / 8;
     let mask = 1 << (7 - offset % 8);
