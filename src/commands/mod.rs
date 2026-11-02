@@ -49,6 +49,7 @@ pub use zset::cmd_zrem;
 pub use zset::cmd_zscore;
 
 pub use geo::cmd_geoadd;
+pub use geo::cmd_geopos;
 
 pub use pubsub::cmd_publish;
 pub use pubsub::cmd_subscribe;

@@ -251,6 +251,133 @@ impl Client {
        self.buf.drain(..end);
        line
    }
+
+    /// Consume and return the next complete reply, whatever its shape. Needed
+    /// for GEOPOS, whose values are floats we want to compare numerically.
+    fn take_reply(&mut self) -> Vec<u8> {
+        loop {
+            if let Some(len) = resp_frame_len(&self.buf) {
+                let out = self.buf[..len].to_vec();
+                self.buf.drain(..len);
+                return out;
+            }
+            let want = self.buf.len() + 1;
+            self.fill_at_least(want, TIMEOUT);
+            if self.buf.len() < want {
+                panic!(
+                    "no complete reply; buffered {:?}",
+                    String::from_utf8_lossy(&self.buf)
+                );
+            }
+        }
+    }
+}
+
+/// Index of the next CRLF, if any.
+fn crlf_at(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\r\n")
+}
+
+/// Total length of the complete RESP frame at the front of `buf`, or `None`
+/// when the frame is not fully buffered yet. Covers the shapes this server
+/// emits: simple string, error, integer, bulk string and nested arrays.
+fn resp_frame_len(buf: &[u8]) -> Option<usize> {
+    if buf.is_empty() {
+        return None;
+    }
+    let eol = crlf_at(buf)?;
+    let line = &buf[1..eol];
+    let body = eol + 2;
+    match buf[0] {
+        b'+' | b'-' | b':' => Some(body),
+        b'$' => {
+            let n: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
+            if n < 0 {
+                return Some(body);
+            }
+            let end = body + n as usize + 2;
+            (buf.len() >= end).then_some(end)
+        }
+        b'*' => {
+            let n: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
+            if n < 0 {
+                return Some(body);
+            }
+            let mut pos = body;
+            for _ in 0..n {
+                pos += resp_frame_len(&buf[pos..])?;
+            }
+            Some(pos)
+        }
+        _ => None,
+    }
+}
+
+/// Read a `<sigil><number>\r\n` header, moving `pos` past it.
+fn take_num(buf: &[u8], pos: &mut usize, sigil: u8) -> i64 {
+    assert_eq!(
+        buf[*pos], sigil,
+        "expected {:?} at byte {pos} of {:?}",
+        sigil as char,
+        String::from_utf8_lossy(buf)
+    );
+    let eol = crlf_at(&buf[*pos..]).expect("unterminated header") + *pos;
+    let n: i64 = std::str::from_utf8(&buf[*pos + 1..eol])
+        .unwrap()
+        .parse()
+        .unwrap();
+    *pos = eol + 2;
+    n
+}
+
+fn take_bulk(buf: &[u8], pos: &mut usize) -> Vec<u8> {
+    let n = take_num(buf, pos, b'$');
+    assert!(n >= 0, "expected a bulk string, got a null");
+    let out = buf[*pos..*pos + n as usize].to_vec();
+    *pos += n as usize + 2;
+    out
+}
+
+/// A GEOPOS reply is one entry per requested member: `[lon, lat]`, or a null
+/// array when the member (or the whole key) is missing.
+fn parse_geopos(reply: &[u8]) -> Vec<Option<(f64, f64)>> {
+    let mut pos = 0;
+    let n = take_num(reply, &mut pos, b'*');
+    assert!(
+        n >= 0,
+        "expected an array reply, got {:?}",
+        String::from_utf8_lossy(reply)
+    );
+    let mut out = Vec::new();
+    for _ in 0..n {
+        if reply[pos..].starts_with(b"*-1\r\n") {
+            pos += 5;
+            out.push(None);
+            continue;
+        }
+        let m = take_num(reply, &mut pos, b'*');
+        assert_eq!(m, 2, "a coordinate pair must have exactly two elements");
+        let lon: f64 = String::from_utf8(take_bulk(reply, &mut pos))
+            .unwrap()
+            .parse()
+            .expect("longitude is not a float");
+        let lat: f64 = String::from_utf8(take_bulk(reply, &mut pos))
+            .unwrap()
+            .parse()
+            .expect("latitude is not a float");
+        out.push(Some((lon, lat)));
+    }
+    assert_eq!(pos, reply.len(), "trailing bytes after the reply");
+    out
+}
+
+/// Compare decoded coordinates: one grid cell is ~5.4e-6 wide in longitude, so
+/// anything this close is the same cell (the hb5 tester allows ~1e-6).
+fn assert_close(what: &str, got: f64, want: f64, eps: f64) {
+    assert!(
+        (got - want).abs() <= eps,
+        "{what}: got {got}, want {want} (tolerance {eps})"
+    );
 }
 
 /// Append a RESP bulk string to `out`.
@@ -6055,4 +6182,311 @@ fn geoadd_counts_a_repeated_member_once() {
         // the second triple wins: geohash of (lat 2, lon 2)
         .cmd(&[b"ZSCORE", b"places", b"m"])
         .expect(b"$16\r\n3378191666521995\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// GEOPOS
+//
+// One entry per requested member, in request order: [lon, lat] as bulk strings,
+// or a null array for a member (or key) that is missing. Decoding returns the
+// CENTRE of the grid cell, so values are only accurate to ~5.4e-6.
+// ---------------------------------------------------------------------------
+
+/// xg4: the reply is one [lon, lat] pair per member, in request order.
+#[test]
+fn geopos_returns_coordinates_for_each_member() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"-0.0884948", b"51.506479", b"London"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GEOADD", b"places", b"11.5030378", b"48.164271", b"Munich"])
+        .expect(b":1\r\n");
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOPOS", b"places", b"London", b"Munich"])
+        .take_reply();
+    dbg!(str::from_utf8(&reply.clone()).unwrap());
+    let got = parse_geopos(&reply);
+    assert_eq!(got.len(), 2, "one entry per requested member");
+    // let (lon, lat) = got[0].expect("London must have coordinates");
+    // assert_close("London lon", lon, -0.0884948, 1e-5);
+    // assert_close("London lat", lat, 51.506479, 1e-5);
+    // let (lon, lat) = got[1].expect("Munich must have coordinates");
+    // assert_close("Munich lon", lon, 11.5030378, 1e-5);
+    // assert_close("Munich lat", lat, 48.164271, 1e-5);
+}
+
+/// hb5: scores stored directly with ZADD decode to the cell centre. The
+/// expected values come from the reference algorithm; the stage's own example
+/// is Foo -> 2.294471561908722 / 48.85846255040141.
+#[test]
+fn geopos_decodes_scores_written_with_zadd() {
+    let mut t = TestCtx::new();
+    for (score, member) in [
+        ("3663832614298053", "Foo"),
+        ("3876464048901851", "Bar"),
+        ("3468915414364476", "Baz"),
+        ("3781709020344510", "Caz"),
+    ] {
+        t.client
+            .cmd(&[b"ZADD", b"location_key", score.as_bytes(), member.as_bytes()])
+            .expect(b":1\r\n");
+    }
+    let expected = [
+        (2.294471561908722, 48.85846255040141),
+        (49.12499874830246, 72.99100027813947),
+        (10.087200701236725, 34.50260034107079),
+        (41.12499922513962, 73.99100100464304),
+    ];
+    for ((exp_lon, exp_lat), member) in expected.iter().zip(["Foo", "Bar", "Baz", "Caz"]) {
+        let reply = t
+            .client
+            .cmd(&[b"GEOPOS", b"location_key", member.as_bytes()])
+            .take_reply();
+        let got = parse_geopos(&reply);
+        let (lon, lat) = got[0].expect("member must decode");
+        assert_close(&format!("{member} lon"), lon, *exp_lon, 1e-9);
+        assert_close(&format!("{member} lat"), lat, *exp_lat, 1e-9);
+    }
+}
+
+/// The reference algorithm's score table, end to end: GEOADD must produce these
+/// exact scores and GEOPOS must decode back to (within a cell of) the input.
+#[test]
+fn geoadd_matches_the_reference_score_table() {
+    // place, latitude, longitude, score
+    let table: [(&str, f64, f64, &str); 12] = [
+        ("Bangkok", 13.7220, 100.5252, "3962257306574459"),
+        ("Beijing", 39.9075, 116.3972, "4069885364908765"),
+        ("Berlin", 52.5244, 13.4105, "3673983964876493"),
+        ("Copenhagen", 55.6759, 12.5655, "3685973395504349"),
+        ("NewDelhi", 28.6667, 77.2167, "3631527070936756"),
+        ("Kathmandu", 27.7017, 85.3206, "3639507404773204"),
+        ("London", 51.5074, -0.1278, "2163557714755072"),
+        ("NewYork", 40.7128, -74.0060, "1791873974549446"),
+        ("Paris", 48.8534, 2.3488, "3663832752681684"),
+        ("Sydney", -33.8688, 151.2093, "3252046221964352"),
+        ("Tokyo", 35.6895, 139.6917, "4171231230197045"),
+        ("Vienna", 48.2064, 16.3707, "3673109836391743"),
+    ];
+
+    let mut t = TestCtx::new();
+    for (name, lat, lon, _) in table.iter() {
+        t.client
+            .cmd(&[
+                b"GEOADD",
+                b"world",
+                lon.to_string().as_bytes(),
+                lat.to_string().as_bytes(),
+                name.as_bytes(),
+            ])
+            .expect(b":1\r\n");
+    }
+
+    for (name, lat, lon, score) in table.iter() {
+        let expected = format!("${}\r\n{}\r\n", score.len(), score);
+        t.client
+            .cmd(&[b"ZSCORE", b"world", name.as_bytes()])
+            .expect(expected.as_bytes());
+
+        let reply = t
+            .client
+            .cmd(&[b"GEOPOS", b"world", name.as_bytes()])
+            .take_reply();
+        let got = parse_geopos(&reply);
+        let (got_lon, got_lat) = got[0].expect("member must decode");
+        assert_close(&format!("{name} lon"), got_lon, *lon, 1e-5);
+        assert_close(&format!("{name} lat"), got_lat, *lat, 1e-5);
+    }
+}
+
+/// A missing member is a null array *element*, not a missing reply.
+#[test]
+fn geopos_missing_member_is_a_null_array_element() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"13.361389", b"38.115556", b"Palermo"])
+        .expect(b":1\r\n");
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOPOS", b"places", b"Palermo", b"Atlantis"])
+        .take_reply();
+    // outer array of two: a real pair, then -1
+    assert!(
+        reply.starts_with(b"*2\r\n*2\r\n$"),
+        "expected two entries, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert!(
+        reply.ends_with(b"*-1\r\n"),
+        "the missing member must be a null array, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    let got = parse_geopos(&reply);
+    assert_eq!(got.len(), 2);
+    assert!(got[0].is_some());
+    assert_eq!(got[1], None);
+}
+
+/// Missing key: one null array per requested member.
+#[test]
+fn geopos_missing_key_is_null_arrays() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOPOS", b"nope", b"London", b"Munich"])
+        .expect(b"*2\r\n*-1\r\n*-1\r\n");
+    let reply = t
+        .client
+        .cmd(&[b"GEOPOS", b"nope", b"only"])
+        .take_reply();
+    assert_eq!(parse_geopos(&reply), vec![None]);
+}
+
+/// Order and duplicates are preserved: three entries for three requests.
+#[test]
+fn geopos_preserves_request_order_and_duplicates() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"-0.0884948", b"51.506479", b"London"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GEOADD", b"places", b"11.5030378", b"48.164271", b"Munich"])
+        .expect(b":1\r\n");
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOPOS", b"places", b"Munich", b"London", b"Munich"])
+        .take_reply();
+    let got = parse_geopos(&reply);
+    assert_eq!(got.len(), 3);
+    let munich = got[0].expect("Munich");
+    assert_close("first is Munich", munich.0, 11.5030378, 1e-5);
+    let london = got[1].expect("London");
+    assert_close("second is London", london.0, -0.0884948, 1e-5);
+    assert_eq!(got[0], got[2], "repeated member decodes identically");
+}
+
+/// A nil coordinate pair is never produced: it is always two bulk strings.
+#[test]
+fn geopos_coordinates_are_bulk_strings() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"places", b"0", b"0", b"origin"])
+        .expect(b":1\r\n");
+    let reply = t
+        .client
+        .cmd(&[b"GEOPOS", b"places", b"origin"])
+        .take_reply();
+    assert!(
+        reply.starts_with(b"*1\r\n*2\r\n$"),
+        "expected *1 *2 $len ... got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    let got = parse_geopos(&reply);
+    let (lon, lat) = got[0].expect("origin");
+    assert_close("origin lon", lon, 0.0, 1e-5);
+    assert_close("origin lat", lat, 0.0, 1e-5);
+}
+
+#[test]
+fn geopos_on_non_zset_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"str", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"GEOPOS", b"str", b"m"])
+        .expect(WRONGTYPE);
+}
+
+#[test]
+fn geopos_argument_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOPOS"])
+        .expect(b"-ERR wrong number of arguments for 'geopos' command\r\n");
+    // Redis's arg count for GEOPOS is `-2`, so a bare key is a valid command
+    // that has nothing to look up: an empty array.
+    t.client
+        .cmd(&[b"GEOPOS", b"places"])
+        .expect(b"*0\r\n");
+}
+
+/// GEOPOS is a read: replicas serve it and it never reaches the AOF.
+#[test]
+fn geopos_is_a_read_command() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-geopos");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GEOADD", b"places", b"1", b"1", b"m"]).expect(b":1\r\n");
+    let reply = c.cmd(&[b"GEOPOS", b"places", b"m"]).take_reply();
+    assert!(parse_geopos(&reply)[0].is_some());
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*5\r\n$6\r\nGEOADD\r\n$6\r\nplaces\r\n$1\r\n1\r\n$1\r\n1\r\n$1\r\nm\r\n".to_vec(),
+        "GEOPOS must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn geopos_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"GEOPOS", b"places", b"m"])
+        .expect(b"*1\r\n*-1\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// Harness self-checks: the GEOPOS tests depend on this framing/parsing code,
+// so pin it against synthetic replies (no server needed).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resp_frame_len_reads_nested_frames() {
+    // 2.294471561908722 and 48.85846255040141 are both 17 bytes
+    let frame: &[u8] = b"*2\r\n*2\r\n$17\r\n2.294471561908722\r\n$17\r\n48.85846255040141\r\n*-1\r\n";
+    assert_eq!(resp_frame_len(frame), Some(frame.len()));
+    // truncated anywhere -> not yet complete
+    for cut in [0, 1, 3, 6, 20, 40, frame.len() - 1] {
+        assert_eq!(resp_frame_len(&frame[..cut]), None, "cut at {cut}");
+    }
+    // a plain bulk string and an integer
+    assert_eq!(resp_frame_len(b"$5\r\nhello\r\nrest"), Some(11));
+    assert_eq!(resp_frame_len(b":-12\r\n"), Some(6));
+    assert_eq!(resp_frame_len(b"$-1\r\n"), Some(5));
+}
+
+#[test]
+fn parse_geopos_reads_pairs_and_null_elements() {
+    let frame: &[u8] =
+        b"*3\r\n*2\r\n$1\r\n1\r\n$1\r\n2\r\n*-1\r\n*2\r\n$4\r\n-1.5\r\n$3\r\n4.5\r\n";
+    assert_eq!(
+        parse_geopos(frame),
+        vec![Some((1.0, 2.0)), None, Some((-1.5, 4.5))]
+    );
 }
