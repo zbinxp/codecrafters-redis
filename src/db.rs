@@ -41,10 +41,10 @@ pub enum Role {
 
 #[allow(dead_code)]
 pub struct User {
-    name: String,
-    enabled: bool,          // on/off 
-    nopass: bool,           // nopass flag
-    passwords: Vec<String>, // sha256 hex
+    pub name: String,
+    pub enabled: bool,          // on/off 
+    pub nopass: bool,           // nopass flag
+    pub passwords: Vec<String>, // sha256 hex
 }
 
 pub(crate) struct Db {

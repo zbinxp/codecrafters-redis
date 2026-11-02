@@ -1,4 +1,4 @@
-use crate::{client::Conn, commands::{CmdResult, bulk_at}, db::Store, error::RedisError, resp::Frame};
+use crate::{client::Conn, commands::{CmdResult, bulk_at}, db::{Store, User}, error::RedisError, resp::Frame};
 
 
 pub fn cmd_acl(args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult {
@@ -19,11 +19,20 @@ pub fn cmd_acl(args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult 
             let Ok(name) = String::from_utf8(name.to_vec()) else {
                 return Ok(vec![Frame::Null])
             };
-            let Some(_user) = store.users.get(&name) else {
+            let Some(user) = store.users.get(&name) else {
                 return Ok(vec![Frame::Null])
             };
-            Ok(vec![Frame::Array(vec![Frame::bulk("flags"), Frame::Array(Vec::new())])])
+            let results = acl_getuser_reply(user);
+            Ok(vec![Frame::Array(vec![Frame::bulk("flags"), Frame::Array(results)])])
         },
         _ => Err(RedisError::unknown_acl_subcommand(str::from_utf8(cmd).unwrap_or_default()))
     }
+}
+
+fn acl_getuser_reply(user: &User) -> Vec<Frame> {
+    let mut flags = Vec::new();
+    if user.nopass {
+        flags.push(Frame::bulk("nopass"));
+    }
+    flags
 }
