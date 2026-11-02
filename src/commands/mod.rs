@@ -7,6 +7,7 @@ mod zset;
 mod transaction;
 mod server;
 mod geo;
+mod auth;
 
 use std::cmp::min;
 
@@ -74,6 +75,8 @@ pub use server::cmd_psync;
 pub use server::cmd_wait;
 pub use server::cmd_config;
 pub use server::cmd_keys;
+
+pub use auth::cmd_acl;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)

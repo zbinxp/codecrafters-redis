@@ -55,6 +55,10 @@ impl RedisError {
         RedisError { message: format!("ERR unknown command '{}'", cmd) }
     }
 
+    pub(crate) fn unknown_acl_subcommand(sub:&str) -> Self {
+        RedisError { message: format!("ERR Unknown subcommand or wrong number of arguments for '{}'. Try ACL HELP.", sub) }
+    }
+
     pub(crate) fn invalid_stream_id() -> Self {
         RedisError { message: "ERR Invalid stream ID specified as stream command argument".into()}
     }

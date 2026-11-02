@@ -20,7 +20,8 @@ pub struct Conn {
     // save keys in watch mode
     pub watched: HashMap<Vec<u8>, u64>,
     pub from_master: bool,
-    pub replaying: bool
+    pub replaying: bool,
+    pub user: Option<String>,
 }
 
 impl Conn {
@@ -33,6 +34,7 @@ impl Conn {
             watched: HashMap::new(),
             from_master: false,
             replaying: false,
+            user: None,
         }
     }
 }

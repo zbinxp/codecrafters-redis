@@ -39,6 +39,14 @@ pub enum Role {
     Replica { host: String, port: u16 }
 }
 
+#[allow(dead_code)]
+pub struct User {
+    name: String,
+    enabled: bool,          // on/off 
+    nopass: bool,           // nopass flag
+    passwords: Vec<String>, // sha256 hex
+}
+
 pub(crate) struct Db {
     pub data: HashMap<Vec<u8>, Entry>,
     pub waiters: HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>,
@@ -62,12 +70,15 @@ pub(crate) struct Db {
     pub auto_aof_rewrite_min_size: u64,
     /// Auto-rewrite when growth since the base is at least this percentage.
     pub auto_aof_rewrite_percentage: u64,
+    pub users: HashMap<String, User>,
     versions: HashMap<Vec<u8>, u64>,
     version_seq: u64,
 }
 
 impl Db {
     pub(crate) fn new(role: Role, dir: Option<String>, dbfilename: Option<String>) -> Self {
+        let mut users = HashMap::new();
+        users.insert("default".to_string(), User{name:"default".into(), enabled:true, nopass:true, passwords:Vec::new()});
         Self {
             data: HashMap::new(),
             waiters: HashMap::new(),
@@ -94,6 +105,7 @@ impl Db {
             aof_last_bgrewrite_ok: Arc::new(AtomicBool::new(true)),
             auto_aof_rewrite_min_size: 64 * 1024 * 1024,
             auto_aof_rewrite_percentage: 100,
+            users,
         }
     }
     

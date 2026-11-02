@@ -6697,3 +6697,134 @@ fn geodist_is_allowed_on_replica() {
     c.cmd(&[b"GEODIST", b"places", b"a", b"b"])
         .expect(b"$-1\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// ACL WHOAMI / ACL GETUSER
+//
+// Every connection starts as the "default" user. GETUSER currently reports a
+// single property, `flags`, which is empty until the nopass/on stages fill it.
+// ---------------------------------------------------------------------------
+
+/// jn4: `default` on every connection, not just the first.
+#[test]
+fn acl_whoami_returns_default_user() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n");
+    let mut second = t.connect();
+    second
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n");
+}
+
+/// gx8: one property so far -- `flags` -- and it is an empty array.
+#[test]
+fn acl_getuser_default_reports_empty_flags() {
+    let mut t = TestCtx::new();
+    let reply = t
+        .client
+        .cmd(&[b"ACL", b"GETUSER", b"default"])
+        .take_reply();
+    assert_eq!(
+        String::from_utf8_lossy(&reply),
+        "*2\r\n$5\r\nflags\r\n*0\r\n",
+        "GETUSER must reply [flags, []]"
+    );
+}
+
+/// An unknown user is a null bulk string, not an error and not an empty array.
+#[test]
+fn acl_getuser_unknown_user_is_null() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"GETUSER", b"nosuchuser"])
+        .expect(b"$-1\r\n");
+}
+
+/// Redis dispatches subcommands case-insensitively.
+#[test]
+fn acl_subcommands_are_case_insensitive() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"whoami"])
+        .expect(b"$7\r\ndefault\r\n")
+        .cmd(&[b"ACL", b"getuser", b"default"])
+        .expect(b"*2\r\n$5\r\nflags\r\n*0\r\n");
+}
+
+/// Arity and unknown-subcommand replies mirror Redis's ACL container command.
+#[test]
+fn acl_argument_and_subcommand_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL"])
+        .expect(b"-ERR wrong number of arguments for 'acl' command\r\n");
+    for cmd in [
+        vec![b"ACL".as_slice(), b"WHOAMI", b"extra"],
+        vec![b"ACL", b"GETUSER"],
+        vec![b"ACL", b"GETUSER", b"default", b"extra"],
+        vec![b"ACL", b"BOGUS"],
+        vec![b"ACL", b"LIST"],
+    ] {
+        let sub = String::from_utf8_lossy(cmd[1]).to_string();
+        let expected = format!(
+            "-ERR Unknown subcommand or wrong number of arguments for '{}'. Try ACL HELP.\r\n",
+            sub
+        );
+        t.client.cmd(&cmd).expect(expected.as_bytes());
+    }
+}
+
+/// ACL is administrative, not a write: replicas serve it and the AOF stays empty.
+#[test]
+fn acl_is_a_read_command() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-acl");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$7\r\ndefault\r\n");
+    c.cmd(&[b"ACL", b"GETUSER", b"default"])
+        .expect(b"*2\r\n$5\r\nflags\r\n*0\r\n");
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert_eq!(
+        got,
+        b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n".to_vec(),
+        "ACL commands must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn acl_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n")
+        .cmd(&[b"ACL", b"GETUSER", b"default"])
+        .expect(b"*2\r\n$5\r\nflags\r\n*0\r\n");
+}
