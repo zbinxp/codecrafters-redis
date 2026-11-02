@@ -6490,3 +6490,210 @@ fn parse_geopos_reads_pairs_and_null_elements() {
         vec![Some((1.0, 2.0)), None, Some((-1.5, 4.5))]
     );
 }
+
+// ---------------------------------------------------------------------------
+// GEODIST
+//
+// Replies with a bulk string of metres, 4 decimals, computed from the DECODED
+// cell centres with Redis's haversine (R = 6372797.560856).
+// ---------------------------------------------------------------------------
+
+/// Parse a bulk-string distance reply.
+fn parse_distance(reply: &[u8]) -> f64 {
+    let mut pos = 0;
+    let raw = take_bulk(reply, &mut pos);
+    assert_eq!(pos, reply.len(), "trailing bytes after the distance");
+    String::from_utf8(raw)
+        .unwrap()
+        .parse()
+        .expect("distance is not a float")
+}
+
+fn add_places(t: &mut TestCtx) {
+    for (name, lon, lat) in [
+        ("Munich", "11.5030378", "48.164271"),
+        ("Paris", "2.2944692", "48.8584625"),
+        ("London", "-0.0884948", "51.506479"),
+        ("Palermo", "13.361389", "38.115556"),
+    ] {
+        t.client
+            .cmd(&[b"GEOADD", b"places", lon.as_bytes(), lat.as_bytes(), name.as_bytes()])
+            .expect(b":1\r\n");
+    }
+}
+
+/// ek6: the stage's example -- Munich to Paris is 682477.7582 m.
+#[test]
+fn geodist_returns_metres_with_four_decimals() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    let reply = t
+        .client
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Paris"])
+        .take_reply();
+    assert!(
+        reply.starts_with(b"$11\r\n"),
+        "expected a bulk string, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert_close("Munich-Paris", parse_distance(&reply), 682477.7582, 1e-4);
+}
+
+/// A second pair, computed independently from the reference algorithm.
+#[test]
+fn geodist_matches_the_reference_algorithm() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    for (a, b, want) in [
+        ("London", "Paris", 339887.1768),
+        ("Palermo", "Munich", 1127717.2885),
+    ] {
+        let reply = t
+            .client
+            .cmd(&[b"GEODIST", b"places", a.as_bytes(), b.as_bytes()])
+            .take_reply();
+        assert_close(&format!("{a}-{b}"), parse_distance(&reply), want, 1e-4);
+    }
+}
+
+#[test]
+fn geodist_is_symmetric_and_zero_for_one_member() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    let forward = t
+        .client
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Paris"])
+        .take_reply();
+    let backward = t
+        .client
+        .cmd(&[b"GEODIST", b"places", b"Paris", b"Munich"])
+        .take_reply();
+    assert_close(
+        "symmetry",
+        parse_distance(&forward),
+        parse_distance(&backward),
+        1e-4,
+    );
+    t.client
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Munich"])
+        .expect(b"$6\r\n0.0000\r\n");
+}
+
+/// Units divide the metre distance; Redis matches them case-insensitively.
+#[test]
+fn geodist_units() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    for (unit, want) in [
+        ("m", 682477.7582),
+        ("km", 682.4778),
+        ("mi", 424.0731),
+        ("ft", 2239100.2564),
+        ("KM", 682.4778),
+        ("ft", 2239100.2564),
+    ] {
+        let reply = t
+            .client
+            .cmd(&[b"GEODIST", b"places", b"Munich", b"Paris", unit.as_bytes()])
+            .take_reply();
+        assert_close(&format!("Munich-Paris in {unit}"), parse_distance(&reply), want, 1e-4);
+    }
+}
+
+/// A missing member or key is a null bulk string, not 0.
+#[test]
+fn geodist_missing_member_or_key_is_null() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    t.client
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Atlantis"])
+        .expect(b"$-1\r\n")
+        .cmd(&[b"GEODIST", b"places", b"Atlantis", b"Munich"])
+        .expect(b"$-1\r\n")
+        .cmd(&[b"GEODIST", b"places", b"Atlantis", b"Thule"])
+        .expect(b"$-1\r\n")
+        .cmd(&[b"GEODIST", b"nope", b"Munich", b"Paris"])
+        .expect(b"$-1\r\n");
+}
+
+#[test]
+fn geodist_on_non_zset_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"str", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"GEODIST", b"str", b"a", b"b"])
+        .expect(WRONGTYPE);
+}
+
+#[test]
+fn geodist_argument_errors() {
+    let mut t = TestCtx::new();
+    add_places(&mut t);
+    for cmd in [
+        vec![b"GEODIST".as_slice()],
+        vec![b"GEODIST", b"places"],
+        vec![b"GEODIST", b"places", b"Munich"],
+        vec![b"GEODIST", b"places", b"Munich", b"Paris", b"km", b"extra"],
+    ] {
+        t.client
+            .cmd(&cmd)
+            .expect(b"-ERR wrong number of arguments for 'geodist' command\r\n");
+    }
+    t.client
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Paris", b"cubits"])
+        .expect(b"-ERR unsupported unit provided. please use M, KM, FT, MI\r\n");
+}
+
+/// GEODIST is a read: replicas serve it and it never reaches the AOF.
+#[test]
+fn geodist_is_a_read_command() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-geodist");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GEOADD", b"places", b"11.5030378", b"48.164271", b"Munich"])
+        .expect(b":1\r\n");
+    c.cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n");
+    let reply = c
+        .cmd(&[b"GEODIST", b"places", b"Munich", b"Paris"])
+        .take_reply();
+    assert_close("Munich-Paris", parse_distance(&reply), 682477.7582, 1e-4);
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&got).contains("GEODIST"),
+        "GEODIST must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn geodist_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"GEODIST", b"places", b"a", b"b"])
+        .expect(b"$-1\r\n");
+}

@@ -102,4 +102,8 @@ impl RedisError {
     pub(crate) fn readonly() -> Self {
         RedisError { message: "READONLY You can't write against a read only replica.".into() }
     }
+
+    pub(crate) fn unsupported_units() -> Self {
+        RedisError { message: "ERR unsupported unit provided. please use M, KM, FT, MI".into() }
+    }
 }

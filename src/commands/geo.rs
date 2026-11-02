@@ -97,6 +97,42 @@ pub fn cmd_geopos(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRes
     Ok(vec![Frame::Array(results)])
 }
 
+/// geodist key member1 member2
+pub fn cmd_geodist(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    match args.len() {
+        4 | 5 => {},
+        _ => return Err(RedisError::wrong_args("geodist"))
+    }
+    let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("geodist"))?;
+    let m1 = bulk_at(args, 2).ok_or_else(||RedisError::wrong_args("geodist"))?;
+    let m2 = bulk_at(args, 3).ok_or_else(||RedisError::wrong_args("geodist"))?;
+    let factor = match bulk_at(args, 4) {
+       None => 1.0,
+       Some(u) if u.eq_ignore_ascii_case(b"m")  => 1.0,
+       Some(u) if u.eq_ignore_ascii_case(b"km") => 1000.0,
+       Some(u) if u.eq_ignore_ascii_case(b"mi") => 1609.34,
+       Some(u) if u.eq_ignore_ascii_case(b"ft") => 0.3048,
+       Some(_) => return Err(RedisError::unsupported_units()),
+   };
+    let Some(entry) = store.live_entry(key) else {
+        return Ok(vec![Frame::Null])
+    };
+    let Value::ZSet(tree) = &entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+    let Some((s1,_)) = tree.iter().find(|(_,m)|m == m1) else {
+        return Ok(vec![Frame::Null])
+    };
+    let Some((s2,_)) = tree.iter().find(|(_,m)|m == m2) else {
+        return Ok(vec![Frame::Null])
+    };
+    let co1 = decode(s1.0 as u64);
+    let co2 = decode(s2.0 as u64);
+    let dist = haversine(co1.longitude, co1.latitude, co2.longitude, co2.latitude);
+    let dist = dist / factor;
+    Ok(vec![Frame::bulk(format!("{dist:.4}"))])
+}
+
 fn spread_int32_to_int64(v: u32) -> u64 {
     let mut result = v as u64;
     result = (result | (result << 16)) & 0x0000FFFF0000FFFF;
@@ -165,6 +201,25 @@ fn decode(geo_code: u64) -> Coordinates {
     let grid_longitude_number = compact_int64_to_int32(y);
     
     convert_grid_numbers_to_coordinates(grid_latitude_number, grid_longitude_number)
+}
+
+const EARTH_RADIUS_IN_METERS: f64 = 6372797.560856;
+
+fn deg_rad(d: f64) -> f64 { d * (std::f64::consts::PI / 180.0) }
+
+fn haversine(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    let lon1r = deg_rad(lon1);
+    let lon2r = deg_rad(lon2);
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    if v == 0.0 {
+        // Redis short-circuits equal longitudes to a pure latitude difference
+        return EARTH_RADIUS_IN_METERS * (deg_rad(lat2) - deg_rad(lat1)).abs();
+    }
+    let lat1r = deg_rad(lat1);
+    let lat2r = deg_rad(lat2);
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = u * u + lat1r.cos() * lat2r.cos() * v * v;
+    2.0 * EARTH_RADIUS_IN_METERS * a.sqrt().asin()
 }
 
 
