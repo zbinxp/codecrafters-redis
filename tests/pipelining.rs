@@ -6718,9 +6718,9 @@ fn acl_whoami_returns_default_user() {
         .expect(b"$7\r\ndefault\r\n");
 }
 
-/// ql6: `flags` now derives from the user -- the default user has nopass set.
+/// pl7: flags plus the (empty) passwords property.
 #[test]
-fn acl_getuser_default_reports_nopass_flag() {
+fn acl_getuser_default_reports_flags_and_passwords() {
     let mut t = TestCtx::new();
     let reply = t
         .client
@@ -6728,8 +6728,8 @@ fn acl_getuser_default_reports_nopass_flag() {
         .take_reply();
     assert_eq!(
         String::from_utf8_lossy(&reply),
-        "*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n",
-        "GETUSER must reply [flags, [nopass]]"
+        "*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n",
+        "GETUSER must reply [flags, [nopass], passwords, []]"
     );
 }
 
@@ -6743,24 +6743,31 @@ fn acl_getuser_flags_is_a_single_element() {
         .cmd(&[b"ACL", b"GETUSER", b"default"])
         .take_reply();
     let mut pos = 0;
-    assert_eq!(take_num(&reply, &mut pos, b'*'), 2, "two properties so far");
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 4, "two name/value pairs");
     assert_eq!(take_bulk(&reply, &mut pos), b"flags");
     assert_eq!(take_num(&reply, &mut pos, b'*'), 1, "exactly one flag");
     assert_eq!(take_bulk(&reply, &mut pos), b"nopass");
+    assert_eq!(take_bulk(&reply, &mut pos), b"passwords");
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 0, "no passwords yet");
     assert_eq!(pos, reply.len(), "no extra properties yet");
 }
 
-/// gx8 boundary: the `passwords` property arrives in the NEXT stage (#120), so
-/// GETUSER must still report a two-element array.
+/// The property list is flat: `flags` then `passwords`, no nesting.
 #[test]
-fn acl_getuser_reports_only_flags_so_far() {
+fn acl_getuser_reports_flags_then_passwords() {
     let mut t = TestCtx::new();
     let reply = t
         .client
         .cmd(&[b"ACL", b"GETUSER", b"default"])
         .take_reply();
     let mut pos = 0;
-    assert_eq!(take_num(&reply, &mut pos, b'*'), 2);
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 4);
+    assert_eq!(take_bulk(&reply, &mut pos), b"flags", "flags comes first");
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 1);
+    assert_eq!(take_bulk(&reply, &mut pos), b"nopass");
+    assert_eq!(take_bulk(&reply, &mut pos), b"passwords");
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 0);
+    assert_eq!(pos, reply.len());
 }
 
 /// An unknown user is a null bulk string, not an error and not an empty array.
@@ -6780,7 +6787,7 @@ fn acl_subcommands_are_case_insensitive() {
         .cmd(&[b"ACL", b"whoami"])
         .expect(b"$7\r\ndefault\r\n")
         .cmd(&[b"ACL", b"getuser", b"default"])
-        .expect(b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n");
+        .expect(b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n");
 }
 
 /// Arity and unknown-subcommand replies mirror Redis's ACL container command.
@@ -6826,7 +6833,7 @@ fn acl_is_a_read_command() {
     c.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
     c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$7\r\ndefault\r\n");
     c.cmd(&[b"ACL", b"GETUSER", b"default"])
-        .expect(b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n");
+        .expect(b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n");
 
     let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
     assert_eq!(
@@ -6856,5 +6863,5 @@ fn acl_is_allowed_on_replica() {
     c.cmd(&[b"ACL", b"WHOAMI"])
         .expect(b"$7\r\ndefault\r\n")
         .cmd(&[b"ACL", b"GETUSER", b"default"])
-        .expect(b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n");
+        .expect(b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n");
 }

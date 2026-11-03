@@ -22,17 +22,22 @@ pub fn cmd_acl(args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult 
             let Some(user) = store.users.get(&name) else {
                 return Ok(vec![Frame::Null])
             };
-            let results = acl_getuser_reply(user);
-            Ok(vec![Frame::Array(vec![Frame::bulk("flags"), Frame::Array(results)])])
+            let properties = acl_getuser_reply(user);
+            Ok(vec![properties])
         },
         _ => Err(RedisError::unknown_acl_subcommand(str::from_utf8(cmd).unwrap_or_default()))
     }
 }
 
-fn acl_getuser_reply(user: &User) -> Vec<Frame> {
+fn acl_getuser_reply(user: &User) -> Frame {
     let mut flags = Vec::new();
     if user.nopass {
         flags.push(Frame::bulk("nopass"));
     }
-    flags
+    let passwords = user.passwords.iter().map(Frame::bulk).collect::<Vec<Frame>>();
+    
+    Frame::Array(vec![
+        Frame::bulk("flags"), Frame::Array(flags),
+        Frame::bulk("passwords"), Frame::Array(passwords)
+    ])
 }
