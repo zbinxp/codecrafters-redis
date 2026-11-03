@@ -77,6 +77,7 @@ pub use server::cmd_config;
 pub use server::cmd_keys;
 
 pub use auth::cmd_acl;
+pub use auth::cmd_auth;
 
 pub(crate) fn bulk_at(args:&[Frame], i:usize) -> Option<&[u8]> {
     args.get(i).and_then(Frame::as_bulk)

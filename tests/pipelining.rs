@@ -7120,3 +7120,193 @@ fn acl_setuser_creates_a_missing_user() {
     );
     assert_eq!(pos, reply.len());
 }
+
+// ---------------------------------------------------------------------------
+// AUTH
+//
+// `AUTH <user> <pass>` with the user defaulting to `default`. Success is
+// `+OK`; every failure is the same opaque WRONGPASS error so user names cannot
+// be probed.
+// ---------------------------------------------------------------------------
+
+const WRONGPASS: &[u8] =
+    b"-WRONGPASS invalid username-password pair or user is disabled.\r\n";
+
+/// hz3: the stage sequence -- wrong password fails, the stored one succeeds.
+#[test]
+fn auth_checks_the_stored_password() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">mypassword"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"wrongpassword"])
+        .expect(WRONGPASS)
+        .cmd(&[b"AUTH", b"default", b"mypassword"])
+        .expect(b"+OK\r\n");
+}
+
+/// The two-argument form authenticates the default user.
+#[test]
+fn auth_one_argument_form_uses_default_user() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">mypassword"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"mypassword"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"nope"])
+        .expect(WRONGPASS);
+}
+
+/// nopass means any password is accepted for that user (three-argument form;
+/// the one-argument form is special-cased by the test below).
+#[test]
+fn auth_accepts_anything_for_nopass_user() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"AUTH", b"default", b"whatever"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"anything"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b""])
+        .expect(b"+OK\r\n");
+}
+
+/// Any of a user's passwords works, and only those.
+#[test]
+fn auth_accepts_each_stored_password() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b">b"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"b"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"c"])
+        .expect(WRONGPASS);
+}
+
+/// Passwords are opaque bulk strings: spaces and symbols are part of the secret.
+#[test]
+fn auth_password_is_binary_safe() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p@ss w0rd\r\n"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"p@ss w0rd\r\n"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"p@ss w0rd"])
+        .expect(WRONGPASS);
+}
+
+/// `resetpass` leaves the user with no way in at all.
+#[test]
+fn auth_fails_after_resetpass() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b"resetpass"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"default", b"a"])
+        .expect(WRONGPASS);
+}
+
+/// A user created by SETUSER starts disabled (`off`), so AUTH refuses it even
+/// with the right password; `on` enables it.
+#[test]
+fn auth_rejects_a_disabled_user() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b">a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"alice", b"a"])
+        .expect(WRONGPASS)
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b"on"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"alice", b"a"])
+        .expect(b"+OK\r\n");
+}
+
+/// An unknown user is the same WRONGPASS error, not a distinct one.
+#[test]
+fn auth_unknown_user_is_wrongpass() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"AUTH", b"nosuchuser", b"x"])
+        .expect(WRONGPASS);
+}
+
+/// A successful AUTH sets the connection's identity; other connections keep
+/// their own.
+#[test]
+fn auth_sets_the_connection_identity() {
+    let mut t = TestCtx::new();
+    let mut other = t.connect();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b"on", b">a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"alice", b"a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$5\r\nalice\r\n");
+    other
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n");
+}
+
+/// A failed AUTH leaves the current identity alone.
+#[test]
+fn auth_failure_does_not_change_the_identity() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b"on", b">a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"alice", b"a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"AUTH", b"alice", b"wrong"])
+        .expect(WRONGPASS)
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$5\r\nalice\r\n");
+}
+
+#[test]
+fn auth_arity_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"AUTH"])
+        .expect(b"-ERR wrong number of arguments for 'auth' command\r\n");
+    t.client
+        .cmd(&[b"AUTH", b"a", b"b", b"c"])
+        .expect(b"-ERR wrong number of arguments for 'auth' command\r\n");
+}
+
+/// Redis 7 keeps the pre-Redis-6 reply for the one-argument form while the
+/// default user still has nopass.
+#[test]
+fn auth_one_argument_form_with_nopass_is_an_error() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"AUTH", b"somepassword"])
+        .expect(b"-ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?\r\n");
+}
+
+#[test]
+fn auth_is_allowed_on_replica() {
+    let _guard = lock_server();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"AUTH", b"default", b"whatever"])
+        .expect(b"+OK\r\n");
+}

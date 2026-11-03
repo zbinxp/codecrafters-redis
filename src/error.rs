@@ -114,4 +114,12 @@ impl RedisError {
     pub(crate) fn unsupported_units() -> Self {
         RedisError { message: "ERR unsupported unit provided. please use M, KM, FT, MI".into() }
     }
+
+    pub(crate) fn auth_without_password() -> Self {
+        RedisError { message: "ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?".into() }
+    }
+
+    pub(crate) fn wrong_pass() -> Self {
+        RedisError { message: "WRONGPASS invalid username-password pair or user is disabled.".into() }
+    }
 }

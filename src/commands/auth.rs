@@ -80,6 +80,47 @@ pub fn cmd_acl(args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult 
     }
 }
 
+/// AUTH default password
+pub fn cmd_auth(args: &[Frame], conn: &mut Conn, store: &mut Store) -> CmdResult {
+    match args.len() {
+        2 | 3 => {},
+        _ => return Err(RedisError::wrong_args("auth"))
+    }
+    // Redis keeps its pre-6 reply for the one-argument form while the default
+    // user still allows passwordless logins (enabled && nopass).
+    if args.len() == 2 {
+        if let Some(default) = store.users.get("default") {
+            if default.enabled && default.nopass {
+                return Err(RedisError::auth_without_password())
+            }
+        }
+    }
+    let (user,pass) = match args.len() {
+        3 => {
+            let user = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("auth"))?;
+            let pass = bulk_at(args, 2).ok_or_else(||RedisError::wrong_args("auth"))?;
+            (user, pass)
+        },
+        _ => {
+            let pass = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("auth"))?;
+            (b"default".as_slice(), pass)
+        },
+    };
+    let user_name = String::from_utf8(user.to_vec()).map_err(|_|RedisError::wrong_pass())?;
+    let authorised = match store.users.get(&user_name) {
+        Some(user) if user.enabled && (user.nopass || user.passwords.iter().any(|h| h==&sha256_hex(pass))) => {
+            true
+        },
+        _ => false
+    };
+    if authorised {
+        conn.user = Some(user_name);
+        Ok(vec![Frame::simple("OK")])
+    } else {
+        Err(RedisError::wrong_pass())
+    }
+}
+
 fn acl_getuser_reply(user: &User) -> Frame {
     let mut flags = Vec::new();
     if user.nopass {
