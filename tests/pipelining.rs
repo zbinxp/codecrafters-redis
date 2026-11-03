@@ -6865,3 +6865,258 @@ fn acl_is_allowed_on_replica() {
         .cmd(&[b"ACL", b"GETUSER", b"default"])
         .expect(b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// ACL SETUSER
+//
+// Rules are args[3..] applied left to right: `>pass` / `<pass` hash the given
+// plaintext, `#hash` / `!hash` add or drop an already-hashed password, and
+// `nopass` / `resetpass` / `on` / `off` set the corresponding attributes.
+// ---------------------------------------------------------------------------
+
+const SHA_MYPASSWORD: &str = "89e01536ac207279409d4de1e5253e01f4a1769e696db0d6062ca9b8f56767c8";
+const SHA_A: &str = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
+const SHA_B: &str = "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d";
+
+/// Pull (flags, passwords) out of `ACL GETUSER default`.
+fn acl_getuser(c: &mut Client) -> (Vec<String>, Vec<String>) {
+    let reply = c.cmd(&[b"ACL", b"GETUSER", b"default"]).take_reply();
+    let mut pos = 0;
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 4, "four elements");
+    assert_eq!(take_bulk(&reply, &mut pos), b"flags");
+    let mut flags = Vec::new();
+    for _ in 0..take_num(&reply, &mut pos, b'*') {
+        flags.push(String::from_utf8(take_bulk(&reply, &mut pos)).unwrap());
+    }
+    assert_eq!(take_bulk(&reply, &mut pos), b"passwords");
+    let mut passwords = Vec::new();
+    for _ in 0..take_num(&reply, &mut pos, b'*') {
+        passwords.push(String::from_utf8(take_bulk(&reply, &mut pos)).unwrap());
+    }
+    assert_eq!(pos, reply.len(), "no trailing bytes");
+    (flags, passwords)
+}
+
+/// uv9: setting a password stores its sha256 and clears nopass.
+#[test]
+fn acl_setuser_stores_a_sha256_and_clears_nopass() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">mypassword"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert!(flags.is_empty(), "nopass must be gone, got {flags:?}");
+    assert_eq!(passwords, vec![SHA_MYPASSWORD.to_string()]);
+    assert_eq!(passwords[0].len(), 64, "hex, not raw bytes");
+    assert!(
+        passwords[0].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "lowercase hex expected, got {:?}",
+        passwords[0]
+    );
+}
+
+/// Several passwords accumulate instead of replacing each other.
+#[test]
+fn acl_setuser_accumulates_passwords_in_order() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b">b"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert!(flags.is_empty());
+    assert_eq!(passwords, vec![SHA_A.to_string(), SHA_B.to_string()]);
+}
+
+/// `<pass` removes exactly one stored password.
+#[test]
+fn acl_setuser_removes_one_password() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b">b"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"<a"])
+        .expect(b"+OK\r\n");
+    assert_eq!(acl_getuser(&mut t.client).1, vec![SHA_B.to_string()]);
+}
+
+/// `#hash` installs a pre-hashed password without re-hashing it.
+#[test]
+fn acl_setuser_accepts_a_prehashed_password() {
+    let mut t = TestCtx::new();
+    let rule = format!("#{SHA_A}");
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", rule.as_bytes()])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert!(flags.is_empty(), "adding a password clears nopass");
+    assert_eq!(passwords, vec![SHA_A.to_string()]);
+}
+
+/// `!hash` drops that hash again, without knowing the plaintext.
+#[test]
+fn acl_setuser_removes_a_prehashed_password() {
+    let mut t = TestCtx::new();
+    for rule in [format!("#{SHA_A}"), format!("#{SHA_B}")] {
+        t.client
+            .cmd(&[b"ACL", b"SETUSER", b"default", rule.as_bytes()])
+            .expect(b"+OK\r\n");
+    }
+    let drop_rule = format!("!{SHA_A}");
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", drop_rule.as_bytes()])
+        .expect(b"+OK\r\n");
+    assert_eq!(acl_getuser(&mut t.client).1, vec![SHA_B.to_string()]);
+}
+
+/// `nopass` clears every password and restores the free pass.
+#[test]
+fn acl_setuser_nopass_clears_passwords() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b">b"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"nopass"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert_eq!(flags, vec!["nopass".to_string()]);
+    assert!(passwords.is_empty(), "nopass clears passwords");
+}
+
+/// `resetpass` clears the passwords but leaves nopass off.
+#[test]
+fn acl_setuser_resetpass_clears_without_nopass() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"resetpass"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert!(flags.is_empty(), "resetpass must not set nopass");
+    assert!(passwords.is_empty());
+}
+
+/// Rules apply left to right, so the last one wins.
+#[test]
+fn acl_setuser_applies_rules_left_to_right() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"nopass", b">a"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert!(flags.is_empty(), "the trailing >a cleared nopass");
+    assert_eq!(passwords, vec![SHA_A.to_string()]);
+
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">a", b"nopass"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert_eq!(flags, vec!["nopass".to_string()], "trailing nopass won");
+    assert!(passwords.is_empty());
+}
+
+/// No rules at all is legal (and changes nothing).
+#[test]
+fn acl_setuser_with_no_rules_is_ok() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default"])
+        .expect(b"+OK\r\n");
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert_eq!(flags, vec!["nopass".to_string()]);
+    assert!(passwords.is_empty());
+}
+
+/// An unknown rule is an error naming the offending modifier.
+#[test]
+fn acl_setuser_rejects_unknown_rules() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"bogus"])
+        .expect(b"-ERR Error in ACL SETUSER modifier 'bogus': Syntax error\r\n");
+}
+
+#[test]
+fn acl_setuser_argument_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER"])
+        .expect(b"-ERR Unknown subcommand or wrong number of arguments for 'SETUSER'. Try ACL HELP.\r\n");
+}
+
+/// SETUSER is administrative: nothing reaches the AOF, and a replica accepts it.
+#[test]
+fn acl_setuser_is_not_a_data_write() {
+    let _guard = lock_server();
+
+    let dir = fresh_dir("aof-acl-setuser");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"ACL", b"SETUSER", b"default", b">mypassword"])
+        .expect(b"+OK\r\n");
+    assert_eq!(acl_getuser(&mut c).1, vec![SHA_MYPASSWORD.to_string()]);
+    assert_eq!(
+        std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap(),
+        b"".to_vec(),
+        "ACL SETUSER must not be appended to the AOF"
+    );
+}
+
+/// A failing rule must not leave earlier rules applied: the whole command is
+/// all-or-nothing.
+#[test]
+fn acl_setuser_is_atomic_on_an_invalid_rule() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">secret", b"bogus"])
+        .expect(b"-ERR Error in ACL SETUSER modifier 'bogus': Syntax error\r\n");
+    // the password from the valid rule was NOT stored, nopass is intact
+    let (flags, passwords) = acl_getuser(&mut t.client);
+    assert_eq!(flags, vec!["nopass".to_string()], "nopass must survive");
+    assert!(passwords.is_empty(), "the valid rule must not be applied");
+
+    // ...and a user that did not exist is not created by a failing command
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b">secret", b"bogus"])
+        .expect(b"-ERR Error in ACL SETUSER modifier 'bogus': Syntax error\r\n")
+        .cmd(&[b"ACL", b"GETUSER", b"alice"])
+        .expect(b"$-1\r\n");
+}
+
+/// The user-creation path from issue 1: a valid command creates the user with
+/// Redis's defaults (off, no nopass) and reports the new password.
+#[test]
+fn acl_setuser_creates_a_missing_user() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b">a"])
+        .expect(b"+OK\r\n");
+    let reply = t
+        .client
+        .cmd(&[b"ACL", b"GETUSER", b"alice"])
+        .take_reply();
+    let mut pos = 0;
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 4);
+    assert_eq!(take_bulk(&reply, &mut pos), b"flags");
+    assert_eq!(
+        take_num(&reply, &mut pos, b'*'),
+        0,
+        "a created user has no nopass"
+    );
+    assert_eq!(take_bulk(&reply, &mut pos), b"passwords");
+    assert_eq!(take_num(&reply, &mut pos, b'*'), 1);
+    assert_eq!(
+        String::from_utf8(take_bulk(&reply, &mut pos)).unwrap(),
+        SHA_A
+    );
+    assert_eq!(pos, reply.len());
+}

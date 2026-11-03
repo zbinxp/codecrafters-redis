@@ -40,6 +40,7 @@ pub enum Role {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct User {
     pub name: String,
     pub enabled: bool,          // on/off 
