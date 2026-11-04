@@ -1,6 +1,6 @@
 # 交接文档 — codecrafters Redis (Rust)
 
-> 更新于 2026-10-29。**学习 session**：用户自己写代码，助手只做 review / 挑毛病。
+> 更新于 2026-11-05。**学习 session**：用户自己写代码，助手只做 review / 挑毛病。
 > 本文件在仓库根目录，`codecrafters submit` 会一起 push，不需要时可删。
 > 其他文档：`README.md`（项目概览）、`LESSON.md`（经验教训）、`STAGES.md`（124 个
 > stage 与进度）、`docs/aof-rewrite-design.md`（AOF rewrite 扩展设计）、
@@ -18,7 +18,7 @@
 
 ## 2. 进度
 
-参考 `STAGES.md`。当前：**99 / 124 完成**。
+参考 `STAGES.md`。当前：**124 / 124 完成**，全部 stage 本地通过。
 
 - core #1–7、Lists #8–18、Streams #19–31 ✅
 - **Transactions #32–42** ✅（si4…jf8）
@@ -27,16 +27,24 @@
 - **RDB Persistence #69–74** ✅（zg5…sm4，**只读 RDB**）
 - **AOF Persistence #75–84** ✅（uj3…kn2）
 - Pub/Sub #85–91、Sorted Sets #92–99 ✅（**乱序提前做的**）
-- 待做：**Bitmaps #100–108**、Geospatial #109–116、Authentication #117–124。
+- **Bitmaps #100–108** ✅（bq9…fr8）
+- **Geospatial #109–116** ✅（zt4…rm9）
+- **Authentication #117–124** ✅（jn4…ws7）
 
 > ⚠️ 平台进度远落后于本地，只有 `codecrafters submit` 才推进远端。
 > 用 `codecrafters task -stage <slug>` 看任意 stage 的官方说明。
 
-### 下一步：`bq9` — Create a bitmap (#100)
+### 下一步：收尾
 
-`SETBIT key offset value`：bitmap 就是 `Value::String`；offset 0 = 首字节 **MSB**
-（`mask = 1 << (7 - offset % 8)`），返回旧 bit；offset 超出长度时用 0 扩展。
-**记得把 `SETBIT` 加进 `is_write_command`**（AOF/复制）。之后才是 GETBIT/BITCOUNT 等。
+1. `codecrafters submit`（远端仍停在 bitmap 之前，一次会推进 24 个 stage）。
+2. 若继续做扩展：AOF rewrite 之外的候选见 §8 的遗留项。
+
+几何/位图/认证三块的实现要点（写新命令时可直接复用）：
+
+- bitmap 就是 `Value::String`，offset 0 = 首字节 **MSB**；`byte_and_mask(offset)` 是唯一入口。
+- 地理位置 = `Value::ZSet`，score 是 52 位 geohash（纬度在偶数位）；`decode` 返回格子中心。
+- 认证是**连接级快照**：`Conn.user` 在连接建立时按 `default` 用户的 `nopass` 决定，
+  之后与 `Db.users` 的后续变更无关。
 
 ### 额外扩展（不在官方 124 stage 内）
 
@@ -49,10 +57,13 @@ src/
   main.rs          只做 CLI 解析（parse_args）→ codecrafters_redis::run(Config)
   lib.rs           pub struct Config；run()：建 Store、加载 RDB、初始化/清理/重放 AOF、起 listener
   resp.rs          Frame（含 Rdb 变体）、encode、frame_len、as_bulk、Decoder（+ pending）
-  db.rs            Entry/Value/Db/Role/Score/StreamId；live_entry、readonly_entry、touch/version；AOF 状态
-  client.rs        Conn：id/subscriptions/out_tx/multi/watched/from_master/replaying
-  connection.rs    StreamHandler：读/写；generate_reply 里特判 BLPOP / XREAD BLOCK / WAIT
-  dispatch.rs      lookup + execute（门禁 → MULTI 入队 → handler → AOF/广播/自动 rewrite）
+  db.rs            Entry/Value/Db/Role/Score/StreamId/User；live_entry、live_entry_readonly、
+                   readonly_entry、touch/version；AOF 状态；users（ACL）
+  client.rs        Conn：id/subscriptions/out_tx/multi/watched/from_master/replaying/user
+  connection.rs    StreamHandler：读/写；建连时按 default 用户 nopass 播种 conn.user；
+                   generate_reply 里先 require_auth，再特判 BLPOP / XREAD BLOCK / WAIT
+  dispatch.rs      lookup + execute（require_auth → 订阅/只读门禁 → MULTI 入队 → handler →
+                   AOF/广播/自动 rewrite）
   error.rs         RedisError（每种 wire 消息一个构造器）
   util.rs          parse<T>、now_ms、unix_ms_to_instant、instant_to_unix_ms
   rdb.rs           RDB 只读解析（字符串 + 过期，binary-safe）
@@ -62,14 +73,26 @@ src/
   commands/
     mod.rs         type CmdResult、bulk_at、resolve_range、各命令 re-export
     connection.rs  PING / ECHO / TYPE
-    string.rs      GET / SET(PX/PXAT/EXAT) / INCR / PEXPIREAT
+    string.rs      GET / SET(PX/PXAT/EXAT) / INCR / PEXPIREAT /
+                   SETBIT / GETBIT / STRLEN / BITCOUNT / BITOP
     list.rs        RPUSH / LPUSH / LRANGE / LLEN / LPOP / BLPOP(async)
     zset.rs        ZADD / ZRANK / ZRANGE / ZCARD / ZSCORE / ZREM
     stream.rs      XADD / XRANGE / XREAD + collect_xread / resolve_ids
     pubsub.rs      PUBLISH / SUBSCRIBE / UNSUBSCRIBE
     transaction.rs MULTI / EXEC / DISCARD / WATCH / UNWATCH
     server.rs      INFO / REPLCONF / PSYNC / WAIT(async) / CONFIG / KEYS
+    geo.rs         GEOADD / GEOPOS / GEODIST / GEOSEARCH；
+                   geohash encode/decode、haversine、unit_to_meters
+    auth.rs        AUTH / ACL（WHOAMI / GETUSER / SETUSER）、sha256_hex
 ```
+
+§3.1 命令注册的三个清单（加新命令时都要过一遍）：
+
+| 位置 | 作用 | 漏掉会怎样 |
+|---|---|---|
+| `dispatch::lookup` | 名字 → handler | unknown command |
+| `dispatch::is_write_command` | AOF + 复制 + 只读门禁 + 自动 rewrite | 副本可写、写不进 AOF |
+| `dispatch::is_auth_exempt` | AUTH/HELLO/QUIT/RESET | 未认证连接无法登录 |
 
 ## 4. 核心抽象
 
@@ -81,11 +104,15 @@ pub type Handler = fn(&[Frame], &mut Conn, &mut Store) -> CmdResult;
 `dispatch::execute(req, conn, store)` 的顺序：
 
 1. `*0` / 首元素非 bulk → `Ok(vec![])`（无回复）。
-2. 订阅模式门禁：非白名单 → `-ERR Can't execute ...`；订阅态 `PING` → `["pong", msg]`。
-3. **只读门禁**：`is_write_command(name) && matches!(store.role, Role::Replica{..}) &&
+2. **认证门禁**：`require_auth(name, conn)` → `-NOAUTH Authentication required.`。
+   只读 `Conn.user`（连接级快照，不需要 store 锁）；`from_master`、`replaying`、
+   `AUTH/HELLO/QUIT/RESET` 豁免。`connection.rs::generate_reply` 在特判异步命令**之前**
+   也要调一次，否则 `BLPOP`/`XREAD BLOCK`/`WAIT` 会绕过它。
+3. 订阅模式门禁：非白名单 → `-ERR Can't execute ...`；订阅态 `PING` → `["pong", msg]`。
+4. **只读门禁**：`is_write_command(name) && matches!(store.role, Role::Replica{..}) &&
    !conn.from_master` → `-READONLY ...`。
-4. **MULTI 入队**：`conn.multi` 为 `Some` 且非控制命令 → push + `+QUEUED`。
-5. `lookup(name)` 派发；handler 成功后若是**写命令**：
+5. **MULTI 入队**：`conn.multi` 为 `Some` 且非控制命令 → push + `+QUEUED`。
+6. `lookup(name)` 派发；handler 成功后若是**写命令**：
    - append 到 `store.aof`（`appendfsync=always` 时 `sync_all`）；
    - 广播给所有 replica 并累加 `master_repl_offset`；
    - 若 `!conn.replaying`，检查 `should_auto_rewrite`，达标就触发 `BGREWRITEAOF`。
@@ -93,7 +120,11 @@ pub type Handler = fn(&[Frame], &mut Conn, &mut Store) -> CmdResult;
 异步命令（`BLPOP`、`XREAD ... BLOCK`、`WAIT`）不进 `lookup`，在
 `connection.rs::generate_reply` 里特判并 `.await`（只在非 MULTI/非订阅模式下）。
 
-`Conn`：`id`、`subscriptions`、`out_tx`、`multi`、`watched`、`from_master`、`replaying`。
+`Conn`：`id`、`subscriptions`、`out_tx`、`multi`、`watched`、`from_master`、`replaying`、`user`。
+
+`Conn.user: Option<String>` 是**身份快照**：建连时若 `default` 用户 `enabled && nopass`
+就置为 `Some("default")`，否则 `None`（未认证）。之后 `ACL SETUSER` 改变密码不影响
+已有连接——这正是 nm2 的语义，也让认证检查不必读 `store.users`。
 
 ## 5. 持久化
 
@@ -214,7 +245,7 @@ struct Db {
 
 | 验证项 | 结果 |
 |---|---|
-| `cargo test` | **21 lib unit + 4 bin unit + 292 integration，全绿，0 warning** |
+| `cargo test` | **23 lib unit + 4 bin unit + 458 integration，全绿，0 warning** |
 | `cargo check --all-targets` | 0 warning |
 | Transactions / WATCH touch / 多 key / 缺失 key / 改回原值 | 集成测试覆盖 |
 | 复制握手、单/多副本传播、只读副本、GETACK/ACK、WAIT | 集成测试（含真副本端到端） |
@@ -222,6 +253,9 @@ struct Db {
 | AOF：append、manifest、replay、orphan 清理、截断修复 | 集成测试 |
 | BGREWRITEAOF：压缩、重启恢复、rewrite 期间写入 | 集成测试 |
 | INFO persistence / CONFIG GET / 自动 rewrite | 集成测试 |
+| Bitmaps：SETBIT/GETBIT/STRLEN/BITCOUNT/BITOP（含不同长度 AND、写命令门禁） | 集成测试 + `geo`/`util` 单测 |
+| Geospatial：GEOADD/GEOPOS/GEODIST/GEOSEARCH，12 向量 score 表、haversine、单位换算 | 集成测试 + `encode` 单测 |
+| Authentication：ACL WHOAMI/GETUSER/SETUSER、AUTH、NOAUTH 门禁（含异步命令与复制链路） | 集成测试 |
 
 ## 8. 已知遗留（不阻塞当前）
 
@@ -244,6 +278,15 @@ struct Db {
     应提前 return 并复位 flag。
 13. `aof_last_bgrewrite_ok` 若后台闭包 panic 不会复位（当前 fs 错误都走 Result）。
 14. 拼写/命名：`Db.replic_acks` 等可统一。
+15. **GEOSEARCH 只支持一种形状**：`FROMLONLAT <lon> <lat> BYRADIUS <r> <unit>`（8 参数）。
+    Redis 还支持 `FROMMEMBER`（7 参数）、`BYBOX`、`ASC/DESC`、`COUNT`、`WITHDIST/WITHCOORD`。
+16. **ACL `#`/`!` 规则会把传入的 hash 转小写**，真 Redis 是逐字节比较（大写 hash 永远不会
+    命中 `AUTH`）。这里因为 `sha256_hex` 恒为小写，转小写反而更宽容，不影响任何 stage。
+17. **`ACL SETUSER` 是"先验证后提交"**（原子），真 Redis 是逐条应用、失败时保留前面的规则。
+    行为差异只在"合法规则 + 非法规则混用"时可见，挑战不测。
+18. `GEOSEARCH` 的负半径判定用 `is_sign_negative()`，把 `-0.0` 也判成负（Redis 用 `< 0`）；
+    `NaN` 两边都放行，结果都是空集。
+19. `User.name` 与 `Db.users` 的 key 重复，可以删字段；`#[allow(dead_code)]` 目前仍挂在 `User` 上。
 
 ## 9. 测试基础设施（`tests/pipelining.rs`，黑盒 raw `TcpStream`）
 
@@ -265,10 +308,10 @@ struct Db {
 
 ```sh
 cd /home/dd/lab/rust-lab/codecrafters-redis-rust
-cargo test                    # 应全绿（21 lib + 4 bin unit + 292 integration）
+cargo test                    # 应全绿（23 lib + 4 bin unit + 458 integration）
 cargo check --all-targets     # 0 warning
-codecrafters task -stage bq9  # 看下一 stage 官方说明
+codecrafters task -stage rm9  # 看任意 stage 的官方说明（codecrafter remote 已配好）
 ./your_program.sh             # 另开终端手动试
 ```
 
-当前 git 状态：干净（最新提交 `b1e3fe6`）。
+当前 git 状态：干净（最新提交见 `git log -1`）。

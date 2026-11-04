@@ -10,13 +10,14 @@ A Redis-compatible server written in Rust + Tokio, built for the
 
 ## Status
 
-**99 / 124 stages done** — see [`STAGES.md`](STAGES.md) for the full list and per-stage status.
+**124 / 124 stages done** — every stage of the challenge passes locally; see
+[`STAGES.md`](STAGES.md) for the full list and per-stage status.
 
 - Core #1–7, Lists #8–18, Streams #19–31
 - Transactions #32–42, Optimistic Locking #43–50
 - Replication #51–68, RDB Persistence #69–74, AOF Persistence #75–84
-- Pub/Sub #85–91 and Sorted Sets #92–99 (implemented out of order)
-- Remaining: Bitmaps #100–108, Geospatial #109–116, Authentication #117–124
+- Pub/Sub #85–91, Sorted Sets #92–99 (implemented out of order)
+- Bitmaps #100–108, Geospatial #109–116, Authentication #117–124
 
 ## What is implemented
 
@@ -26,6 +27,17 @@ A Redis-compatible server written in Rust + Tokio, built for the
   `INCR`, `PEXPIREAT`, `TYPE`, `KEYS`, `CONFIG GET`.
 - **Lists**: `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` (blocking).
 - **Sorted sets**: `ZADD`, `ZRANK`, `ZRANGE`, `ZCARD`, `ZSCORE`, `ZREM`.
+- **Bitmaps** (plain strings, MSB-first bit offsets): `SETBIT`, `GETBIT`,
+  `STRLEN`, `BITCOUNT` (byte range), `BITOP` (`AND`/`OR`, any number of
+  sources, shorter sources zero-padded, empty result deletes the destination).
+- **Geospatial** (sorted sets scored by a 52-bit geohash): `GEOADD` (deal with
+  coordinate validation), `GEOPOS` (decode to the cell centre), `GEODIST`
+  (Redis's haversine, `m`/`km`/`mi`/`ft`), `GEOSEARCH ... FROMLONLAT ... BYRADIUS ...`.
+- **Authentication / ACL**: `AUTH` (both forms, including Redis's pre-6
+  one-argument reply), `ACL WHOAMI`, `ACL GETUSER` (`flags`, `passwords`),
+  `ACL SETUSER` (`>pass`, `<pass`, `#hash`, `!hash`, `nopass`, `resetpass`,
+  `on`, `off`; passwords stored as SHA-256 hex), and a `NOAUTH` gate that
+  covers every command except `AUTH`/`HELLO`/`QUIT`/`RESET`.
 - **Streams**: `XADD`, `XRANGE`, `XREAD` (including `BLOCK` and `$`).
 - **Pub/Sub**: `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, subscribed mode.
 - **Transactions**: `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`; optimistic
@@ -51,17 +63,17 @@ src/
   main.rs         command-line parsing
   lib.rs          Config + run(): server setup, AOF/RDB loading
   resp.rs         Frame, encode, Decoder
-  db.rs           Entry / Value / Db, role, AOF state, versions
-  client.rs       per-connection Conn
-  connection.rs   StreamHandler: read/write, blocking and WAIT commands
-  dispatch.rs     lookup + execute (subscribe mode, read-only, MULTI queue)
+  db.rs           Entry / Value / Db, role, AOF state, versions, ACL users
+  client.rs       per-connection Conn (including the authenticated identity)
+  connection.rs   StreamHandler: read/write, auth seeding, blocking and WAIT
+  dispatch.rs     lookup + execute (auth, subscribe mode, read-only, MULTI queue)
   error.rs        RedisError
   util.rs         parsing and time helpers
   rdb.rs          RDB reader
   aof.rs          manifest, serialization, BGREWRITEAOF, cleanup
   replica.rs      replica handshake + replication command stream
   commands/       connection, string, list, zset, stream, pubsub,
-                  transaction, server handlers
+                  transaction, server, geo, auth handlers
 ```
 
 ## Run & test

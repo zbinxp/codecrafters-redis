@@ -4,12 +4,14 @@
 > Order verified against `codecrafters task -stage +N` (boundaries: cc3, fn4, ic1, jn4).
 > Source: codecrafters-io/build-your-own-redis course-definition. Generated: 2026-09-27.
 >
-> **Progress: 99 done.** core #1–7, Lists #8–18, Streams #19–31,
-> Transactions #32–42, Optimistic Locking #43–50, Replication #51–68,
-> RDB Persistence #69–74, AOF Persistence #75–84.
-> Pub/Sub #85–91 and Sorted Sets #92–99 were implemented **out of order** and are done.
-> **NEXT: `bq9` — Create a bitmap (#100)**, then Geospatial #109–116,
-> Authentication #117–124.
+> **Progress: 124 done — every stage of the challenge passes locally.**
+> core #1–7, Lists #8–18, Streams #19–31, Transactions #32–42,
+> Optimistic Locking #43–50, Replication #51–68, RDB Persistence #69–74,
+> AOF Persistence #75–84, Pub/Sub #85–91, Sorted Sets #92–99,
+> Bitmaps #100–108, Geospatial #109–116, Authentication #117–124.
+> Pub/Sub, Sorted Sets and everything from #100 on were implemented **out of
+> order** relative to the platform's stage progression; only `codecrafters
+> submit` advances the remote count.
 
 | # | Stage | Slug | Group | Status |
 |---|-------|------|-------|--------|
@@ -112,30 +114,30 @@
 | 97 | Count sorted set members | `kn4` | Sorted Sets | done |
 | 98 | Retrieve member score | `gd7` | Sorted Sets | done |
 | 99 | Remove a member | `sq7` | Sorted Sets | done |
-| 100 | Create a bitmap | `bq9` | Bitmaps |  |
-| 101 | Retrieve a bit | `qj1` | Bitmaps |  |
-| 102 | Read a string as bits | `yj2` | Bitmaps |  |
-| 103 | Read bits as a string | `pk5` | Bitmaps |  |
-| 104 | Grow a bitmap | `yf6` | Bitmaps |  |
-| 105 | Count set bits | `nx3` | Bitmaps |  |
-| 106 | AND two bitmaps | `hv4` | Bitmaps |  |
-| 107 | AND bitmaps of different lengths | `dk2` | Bitmaps |  |
-| 108 | OR two bitmaps | `fr8` | Bitmaps |  |
-| 109 | Respond to GEOADD | `zt4` | Geospatial Commands |  |
-| 110 | Validate coordinates | `ck3` | Geospatial Commands |  |
-| 111 | Store a location | `tn5` | Geospatial Commands |  |
-| 112 | Calculate location score | `cr3` | Geospatial Commands |  |
-| 113 | Respond to GEOPOS | `xg4` | Geospatial Commands |  |
-| 114 | Decode coordinates | `hb5` | Geospatial Commands |  |
-| 115 | Calculate distance | `ek6` | Geospatial Commands |  |
-| 116 | Search within radius | `rm9` | Geospatial Commands |  |
-| 117 | Respond to ACL WHOAMI | `jn4` | Authentication |  |
-| 118 | Respond to ACL GETUSER | `gx8` | Authentication |  |
-| 119 | The nopass flag | `ql6` | Authentication |  |
-| 120 | The passwords property | `pl7` | Authentication |  |
-| 121 | Setting default user password | `uv9` | Authentication |  |
-| 122 | The AUTH command | `hz3` | Authentication |  |
-| 123 | Enforce authentication | `nm2` | Authentication |  |
-| 124 | Authenticate using AUTH | `ws7` | Authentication |  |
+| 100 | Create a bitmap | `bq9` | Bitmaps | done |
+| 101 | Retrieve a bit | `qj1` | Bitmaps | done |
+| 102 | Read a string as bits | `yj2` | Bitmaps | done |
+| 103 | Read bits as a string | `pk5` | Bitmaps | done |
+| 104 | Grow a bitmap | `yf6` | Bitmaps | done |
+| 105 | Count set bits | `nx3` | Bitmaps | done |
+| 106 | AND two bitmaps | `hv4` | Bitmaps | done |
+| 107 | AND bitmaps of different lengths | `dk2` | Bitmaps | done |
+| 108 | OR two bitmaps | `fr8` | Bitmaps | done |
+| 109 | Respond to GEOADD | `zt4` | Geospatial Commands | done |
+| 110 | Validate coordinates | `ck3` | Geospatial Commands | done |
+| 111 | Store a location | `tn5` | Geospatial Commands | done |
+| 112 | Calculate location score | `cr3` | Geospatial Commands | done |
+| 113 | Respond to GEOPOS | `xg4` | Geospatial Commands | done |
+| 114 | Decode coordinates | `hb5` | Geospatial Commands | done |
+| 115 | Calculate distance | `ek6` | Geospatial Commands | done |
+| 116 | Search within radius | `rm9` | Geospatial Commands | done |
+| 117 | Respond to ACL WHOAMI | `jn4` | Authentication | done |
+| 118 | Respond to ACL GETUSER | `gx8` | Authentication | done |
+| 119 | The nopass flag | `ql6` | Authentication | done |
+| 120 | The passwords property | `pl7` | Authentication | done |
+| 121 | Setting default user password | `uv9` | Authentication | done |
+| 122 | The AUTH command | `hz3` | Authentication | done |
+| 123 | Enforce authentication | `nm2` | Authentication | done |
+| 124 | Authenticate using AUTH | `ws7` | Authentication | done |
 
 Total: 124 stages
