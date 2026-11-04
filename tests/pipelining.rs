@@ -7652,6 +7652,8 @@ fn noauth_applies_to_every_command() {
         vec![b"GEOPOS", b"g", b"m"],
         vec![b"GEODIST", b"g", b"m", b"m"],
         vec![b"ACL", b"WHOAMI"],
+        vec![b"ACL", b"GETUSER", b"default"],
+        vec![b"ACL", b"SETUSER", b"default", b">x"],
         vec![b"WAIT", b"0", b"0"],
         vec![b"REPLCONF", b"ACK", b"0"],
         vec![b"PSYNC", b"?", b"-1"],
@@ -7673,6 +7675,27 @@ fn noauth_applies_to_every_command() {
 }
 
 /// A second AUTH switches identity; the last successful one wins.
+/// Authentication survives a genuinely blocking BLPOP: the waiter is woken
+/// normally once its list gets an element.
+#[test]
+fn authenticated_blocking_client_is_woken() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut waiter = t.connect();
+    waiter.cmd(&[b"AUTH", b"default", b"p"]).expect(b"+OK\r\n");
+
+    waiter.cmd(&[b"BLPOP", b"queue", b"0"]);
+    waiter.expect_silent(Duration::from_millis(120));
+    t.client.cmd(&[b"RPUSH", b"queue", b"item"]).expect(b":1\r\n");
+    waiter.expect(b"*2\r\n$5\r\nqueue\r\n$4\r\nitem\r\n");
+    // ...and the connection is still authenticated afterwards
+    waiter
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n");
+}
+
 #[test]
 fn auth_can_switch_users_on_a_live_connection() {
     let mut t = TestCtx::new();
