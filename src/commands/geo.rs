@@ -106,14 +106,7 @@ pub fn cmd_geodist(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRe
     let key = bulk_at(args, 1).ok_or_else(||RedisError::wrong_args("geodist"))?;
     let m1 = bulk_at(args, 2).ok_or_else(||RedisError::wrong_args("geodist"))?;
     let m2 = bulk_at(args, 3).ok_or_else(||RedisError::wrong_args("geodist"))?;
-    let factor = match bulk_at(args, 4) {
-       None => 1.0,
-       Some(u) if u.eq_ignore_ascii_case(b"m")  => 1.0,
-       Some(u) if u.eq_ignore_ascii_case(b"km") => 1000.0,
-       Some(u) if u.eq_ignore_ascii_case(b"mi") => 1609.34,
-       Some(u) if u.eq_ignore_ascii_case(b"ft") => 0.3048,
-       Some(_) => return Err(RedisError::unsupported_units()),
-   };
+    let factor = unit_to_meters(bulk_at(args, 4))?;
     let Some(entry) = store.live_entry(key) else {
         return Ok(vec![Frame::Null])
     };
@@ -131,6 +124,49 @@ pub fn cmd_geodist(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdRe
     let dist = haversine(co1.longitude, co1.latitude, co2.longitude, co2.latitude);
     let dist = dist / factor;
     Ok(vec![Frame::bulk(format!("{dist:.4}"))])
+}
+
+/// GEOSEARCH places FROMLONLAT 2 48 BYRADIUS 100000 m
+pub fn cmd_geosearch(args: &[Frame], _conn: &mut Conn, store: &mut Store) -> CmdResult {
+    if args.len() != 8 {
+        return Err(RedisError::wrong_args("geosearch"))
+    }
+    let places = bulk_at(args, 1).ok_or_else(||RedisError::syntax_error())?;
+    match bulk_at(args, 2).map(|k| k == b"FROMLONLAT") {
+        Some(true) => {},
+        _ => return Err(RedisError::syntax_error()),
+    }
+    let from_lon = bulk_at(args, 3).ok_or_else(||RedisError::syntax_error())?;
+    let from_lat = bulk_at(args, 4).ok_or_else(||RedisError::syntax_error())?;
+    match bulk_at(args, 5).map(|k| k == b"BYRADIUS") {
+        Some(true) => {},
+        _ => return Err(RedisError::syntax_error()),
+    }
+    let radius_bytes = bulk_at(args, 6).ok_or_else(||RedisError::syntax_error())?;
+    // let unit = bulk_at(args, 7).ok_or_else(||RedisError::syntax_error())?;
+    let lon = util::parse::<f64>(from_lon).ok_or_else(||RedisError::not_valid_float())?;
+    let lat = util::parse::<f64>(from_lat).ok_or_else(||RedisError::not_valid_float())?;
+    let radius = util::parse::<f64>(radius_bytes).ok_or_else(||RedisError::not_valid_float())?;
+    if radius < 0.0 {
+        return Err(RedisError::radius_negative())
+    }
+    let Some(entry) = store.live_entry(places) else {
+        return Ok(vec![Frame::Array(vec![])])
+    };
+    let Value::ZSet(tree) = &entry.value else {
+        return Err(RedisError::wrong_type())
+    };
+
+    let centre = (lon, lat);                        // as given, NOT decoded
+    let limit = radius * unit_to_meters(bulk_at(args, 7))?;      // m=1, km=1000, mi=1609.34,ft=0.3048
+    let mut hits = Vec::new();
+    for (score, member) in tree.iter() {
+        let c = decode(score.0 as u64);
+        if haversine(centre.0, centre.1, c.longitude, c.latitude) <= limit {
+            hits.push(Frame::bulk(member));
+        }
+    }
+    Ok(vec![Frame::Array(hits)])
 }
 
 fn spread_int32_to_int64(v: u32) -> u64 {
@@ -159,6 +195,18 @@ fn encode(latitude: f64, longitude: f64) -> u64 {
     let lon_int = normalized_longitude as u32;
 
     interleave(lat_int, lon_int)
+}
+
+fn unit_to_meters(unit: Option<&[u8]>) -> Result<f64, RedisError> {
+    let factor = match unit {
+       None => 1.0,
+       Some(u) if u.eq_ignore_ascii_case(b"m")  => 1.0,
+       Some(u) if u.eq_ignore_ascii_case(b"km") => 1000.0,
+       Some(u) if u.eq_ignore_ascii_case(b"mi") => 1609.34,
+       Some(u) if u.eq_ignore_ascii_case(b"ft") => 0.3048,
+       Some(_) => return Err(RedisError::unsupported_units()),
+   };
+   Ok(factor)
 }
 
 

@@ -126,4 +126,8 @@ impl RedisError {
     pub(crate) fn noauth() -> Self {
         RedisError { message: "NOAUTH Authentication required.".into() }
     }
+
+    pub(crate) fn radius_negative() -> Self {
+        RedisError { message: "ERR radius cannot be negative".into() }
+    }
 }

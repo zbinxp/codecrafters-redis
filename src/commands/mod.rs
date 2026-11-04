@@ -52,6 +52,7 @@ pub use zset::cmd_zscore;
 pub use geo::cmd_geoadd;
 pub use geo::cmd_geopos;
 pub use geo::cmd_geodist;
+pub use geo::cmd_geosearch;
 
 pub use pubsub::cmd_publish;
 pub use pubsub::cmd_subscribe;

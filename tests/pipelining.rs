@@ -7690,3 +7690,252 @@ fn auth_can_switch_users_on_a_live_connection() {
     c.cmd(&[b"AUTH", b"alice", b"wrong"]).expect(WRONGPASS);
     c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$5\r\nalice\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// GEOSEARCH (FROMLONLAT ... BYRADIUS ...)
+// ---------------------------------------------------------------------------
+
+/// Members of a GEOSEARCH reply, sorted: the stage allows any order.
+fn parse_members(reply: &[u8]) -> Vec<String> {
+    let mut pos = 0;
+    let n = take_num(reply, &mut pos, b'*');
+    assert!(
+        n >= 0,
+        "expected an array reply, got {:?}",
+        String::from_utf8_lossy(reply)
+    );
+    let mut out = Vec::new();
+    for _ in 0..n {
+        out.push(String::from_utf8(take_bulk(reply, &mut pos)).unwrap());
+    }
+    assert_eq!(pos, reply.len(), "trailing bytes after the reply");
+    out.sort();
+    out
+}
+
+fn add_search_places(t: &mut TestCtx) {
+    for (name, lon, lat) in [
+        ("Munich", "11.5030378", "48.164271"),
+        ("Paris", "2.2944692", "48.8584625"),
+        ("London", "-0.0884948", "51.506479"),
+    ] {
+        t.client
+            .cmd(&[b"GEOADD", b"places", lon.as_bytes(), lat.as_bytes(), name.as_bytes()])
+            .expect(b":1\r\n");
+    }
+}
+
+/// rm9: the stage's three queries.
+#[test]
+fn geosearch_finds_members_within_a_radius() {
+    let mut t = TestCtx::new();
+    add_search_places(&mut t);
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"100000", b"m"])
+        .take_reply();
+    assert_eq!(parse_members(&reply), vec!["Paris".to_string()]);
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"500000", b"m"])
+        .take_reply();
+    assert_eq!(
+        parse_members(&reply),
+        vec!["London".to_string(), "Paris".to_string()],
+        "500 km from (2,48) reaches London too"
+    );
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"11", b"50", b"BYRADIUS", b"300000", b"m"])
+        .take_reply();
+    assert_eq!(parse_members(&reply), vec!["Munich".to_string()]);
+}
+
+/// A radius that reaches nothing is an empty array, not a null.
+#[test]
+fn geosearch_outside_everything_is_an_empty_array() {
+    let mut t = TestCtx::new();
+    add_search_places(&mut t);
+    // the Pacific
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"-140", b"0", b"BYRADIUS", b"1000", b"km"])
+        .expect(b"*0\r\n");
+    // ...and a zero radius at a point no cell centre lands on
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"0", b"m"])
+        .expect(b"*0\r\n");
+}
+
+/// A missing key is an empty array (Redis does not answer nil here).
+#[test]
+fn geosearch_missing_key_is_an_empty_array() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOSEARCH", b"nope", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"10", b"km"])
+        .expect(b"*0\r\n");
+}
+
+/// The same search expressed in different units gives the same members.
+#[test]
+fn geosearch_units_are_equivalent() {
+    let mut t = TestCtx::new();
+    add_search_places(&mut t);
+    let want = vec!["London".to_string(), "Paris".to_string()];
+    for unit in ["m", "km", "mi", "ft", "KM"] {
+        let radius = match unit {
+            "m" => "500000".to_string(),
+            "km" => "500".to_string(),
+            "mi" => (500.0f64 / 1.60934).to_string(),
+            "ft" => (500_000.0f64 / 0.3048).to_string(),
+            _ => "500".to_string(),
+        };
+        let reply = t
+            .client
+            .cmd(&[
+                b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48",
+                b"BYRADIUS", radius.as_bytes(), unit.as_bytes(),
+            ])
+            .take_reply();
+        assert_eq!(parse_members(&reply), want, "radius in {unit}");
+    }
+}
+
+/// A boundary: Palermo is 1127.7173 km from Munich, so 1127 km misses it and
+/// 1129 km finds it.
+#[test]
+fn geosearch_respects_the_radius_boundary() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOADD", b"two", b"13.361389", b"38.115556", b"Palermo"])
+        .expect(b":1\r\n")
+        .cmd(&[b"GEOADD", b"two", b"11.5030378", b"48.164271", b"Munich"])
+        .expect(b":1\r\n");
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"two", b"FROMLONLAT", b"13.361389", b"38.115556",
+                b"BYRADIUS", b"1127", b"km"])
+        .take_reply();
+    assert_eq!(parse_members(&reply), vec!["Palermo".to_string()]);
+
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"two", b"FROMLONLAT", b"13.361389", b"38.115556",
+                b"BYRADIUS", b"1129", b"km"])
+        .take_reply();
+    assert_eq!(
+        parse_members(&reply),
+        vec!["Munich".to_string(), "Palermo".to_string()]
+    );
+}
+
+/// Any sorted set works: the scores are geohashes whether or not GEOADD made
+/// them (3663832614298053 is Paris).
+#[test]
+fn geosearch_works_on_a_plain_sorted_set() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ZADD", b"raw", b"3663832614298053", b"Paris"])
+        .expect(b":1\r\n");
+    let reply = t
+        .client
+        .cmd(&[b"GEOSEARCH", b"raw", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"100", b"km"])
+        .take_reply();
+    assert_eq!(parse_members(&reply), vec!["Paris".to_string()]);
+}
+
+#[test]
+fn geosearch_on_non_zset_key_is_wrongtype() {
+    let mut t = TestCtx::new();
+    t.client.cmd(&[b"SET", b"str", b"v"]).expect(b"+OK\r\n");
+    t.client
+        .cmd(&[b"GEOSEARCH", b"str", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"1", b"km"])
+        .expect(WRONGTYPE);
+}
+
+#[test]
+fn geosearch_argument_errors() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places"])
+        .expect(b"-ERR wrong number of arguments for 'geosearch' command\r\n");
+    // too few arguments: the full FROMLONLAT + BYRADIUS shape needs eight
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2"])
+        .expect(b"-ERR wrong number of arguments for 'geosearch' command\r\n");
+    // right argument count, unknown centre option -> syntax error
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMCOORD", b"2", b"48", b"BYRADIUS", b"1", b"km"])
+        .expect(b"-ERR syntax error\r\n");
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYBOX", b"1", b"km"])
+        .expect(b"-ERR syntax error\r\n");
+}
+
+#[test]
+fn geosearch_coordinate_and_radius_errors() {
+    let mut t = TestCtx::new();
+    add_search_places(&mut t);
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"-1", b"km"])
+        .expect(b"-ERR radius cannot be negative\r\n");
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"abc", b"km"])
+        .expect(b"-ERR value is not a valid float\r\n");
+    t.client
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"1", b"cubits"])
+        .expect(b"-ERR unsupported unit provided. please use M, KM, FT, MI\r\n");
+}
+
+/// GEOSEARCH is a read: replicas serve it and it never reaches the AOF.
+#[test]
+fn geosearch_is_a_read_command() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-geosearch");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut c = Client::connect_to(&addr);
+    c.cmd(&[b"GEOADD", b"places", b"2.2944692", b"48.8584625", b"Paris"])
+        .expect(b":1\r\n");
+    let reply = c
+        .cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"100", b"km"])
+        .take_reply();
+    assert_eq!(parse_members(&reply), vec!["Paris".to_string()]);
+
+    let got = std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&got).contains("GEOSEARCH"),
+        "GEOSEARCH must not be appended to the AOF"
+    );
+}
+
+#[test]
+fn geosearch_is_allowed_on_replica() {
+    let _guard = lock_server();
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let dead_master = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let replicaof = format!("{} {}", dead_master.ip(), dead_master.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let mut c = Client::connect_to(&replica_addr);
+    c.cmd(&[b"GEOSEARCH", b"places", b"FROMLONLAT", b"2", b"48", b"BYRADIUS", b"1", b"km"])
+        .expect(b"*0\r\n");
+}
