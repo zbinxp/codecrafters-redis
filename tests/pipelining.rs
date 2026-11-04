@@ -7310,3 +7310,250 @@ fn auth_is_allowed_on_replica() {
     c.cmd(&[b"AUTH", b"default", b"whatever"])
         .expect(b"+OK\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// Enforcing authentication (nm2)
+//
+// A connection is authenticated at connect time iff the default user has
+// nopass; after that it keeps its identity. Everything except AUTH (and
+// HELLO/QUIT/RESET) answers -NOAUTH until it authenticates.
+// ---------------------------------------------------------------------------
+
+const NOAUTH: &[u8] = b"-NOAUTH Authentication required.\r\n";
+
+/// nm2: the stage's two-client scenario.
+#[test]
+fn noauth_is_enforced_for_new_connections() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">newpassword"])
+        .expect(b"+OK\r\n");
+    // the connection that was already authenticated stays that way
+    t.client
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n")
+        .cmd(&[b"SET", b"k", b"v"])
+        .expect(b"+OK\r\n");
+
+    // a connection made after the password was set starts unauthenticated
+    let mut second = t.connect();
+    for cmd in [
+        vec![b"ACL".as_slice(), b"WHOAMI"],
+        vec![b"PING"],
+        vec![b"GET", b"k"],
+        vec![b"SET", b"k", b"other"],
+        vec![b"TYPE", b"k"],
+    ] {
+        second.cmd(&cmd).expect(NOAUTH);
+    }
+    // AUTH is exempt, and unlocks the connection
+    second
+        .cmd(&[b"AUTH", b"default", b"newpassword"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n")
+        .cmd(&[b"GET", b"k"])
+        .expect(b"$1\r\nv\r\n");
+}
+
+/// A failed AUTH leaves the connection locked.
+#[test]
+fn noauth_survives_a_failed_auth() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">newpassword"])
+        .expect(b"+OK\r\n");
+    let mut c = t.connect();
+    c.cmd(&[b"AUTH", b"default", b"wrong"]).expect(WRONGPASS);
+    c.cmd(&[b"GET", b"k"]).expect(NOAUTH);
+    c.cmd(&[b"AUTH", b"default", b"newpassword"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"GET", b"k"])
+        .expect(b"$-1\r\n");
+}
+
+/// The gate must also cover the async-blocking commands, which are dispatched
+/// before `execute()` in `generate_reply`.
+#[test]
+fn noauth_covers_blocking_commands_and_wait() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut c = t.connect();
+    // all three must answer immediately rather than block
+    c.cmd(&[b"BLPOP", b"nolist", b"0"]).expect(NOAUTH);
+    c.cmd(&[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"s", b"$"])
+        .expect(NOAUTH);
+    c.cmd(&[b"WAIT", b"0", b"0"]).expect(NOAUTH);
+}
+
+/// ...and they work normally once authenticated.
+#[test]
+fn authenticated_connection_can_block_and_wait() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"])
+        .expect(b"$3\r\n0-1\r\n");
+    let mut c = t.connect();
+    c.cmd(&[b"AUTH", b"default", b"p"]).expect(b"+OK\r\n");
+
+    // BLPOP with a short timeout on an empty list: nil array
+    c.cmd(&[b"BLPOP", b"nolist", b"0.05"]).expect(b"*-1\r\n");
+    // XREAD BLOCK returns immediately when data already exists
+    c.cmd(&[b"XREAD", b"BLOCK", b"1000", b"STREAMS", b"s", b"0-0"])
+        .expect(b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n");
+    c.cmd(&[b"WAIT", b"0", b"0"]).expect(b":0\r\n");
+}
+
+/// The gate runs before MULTI queueing, so nothing gets `+QUEUED`.
+#[test]
+fn noauth_precedes_multi() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut c = t.connect();
+    c.cmd(&[b"MULTI"]).expect(NOAUTH);
+    c.cmd(&[b"SET", b"k", b"v"]).expect(NOAUTH);
+    c.cmd(&[b"EXEC"]).expect(NOAUTH);
+}
+
+/// A rejected write never reaches the AOF.
+#[test]
+fn noauth_writes_never_reach_the_aof() {
+    let _guard = lock_server();
+    let dir = fresh_dir("aof-noauth");
+    let aof_dir = setup_aof_dir(&dir, "random.1.incr.aof");
+    let dir_s = dir.to_string_lossy().to_string();
+    let addr = free_addr();
+    let _s = Server::start_on(&addr, &[
+        "--dir", &dir_s,
+        "--appendonly", "yes",
+        "--appenddirname", "appendonlydir",
+        "--appendfilename", "appendonly.aof",
+        "--appendfsync", "always",
+    ]);
+    let mut admin = Client::connect_to(&addr);
+    admin
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut anon = Client::connect_to(&addr);
+    anon.cmd(&[b"SET", b"k", b"v"]).expect(NOAUTH);
+
+    assert_eq!(
+        std::fs::read(aof_dir.join("random.1.incr.aof")).unwrap(),
+        b"".to_vec(),
+        "a rejected write must not be appended"
+    );
+}
+
+/// Restoring nopass makes new connections authenticated again.
+#[test]
+fn nopass_restores_auto_authentication() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut locked = t.connect();
+    locked.cmd(&[b"GET", b"k"]).expect(NOAUTH);
+
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b"nopass"])
+        .expect(b"+OK\r\n");
+    let mut fresh = t.connect();
+    fresh
+        .cmd(&[b"ACL", b"WHOAMI"])
+        .expect(b"$7\r\ndefault\r\n");
+    // the connection that locked itself out stays locked out
+    locked.cmd(&[b"GET", b"k"]).expect(NOAUTH);
+}
+
+/// The master link is exempt: propagated commands still apply while the
+/// replica's default user requires a password.
+#[test]
+fn replication_link_ignores_authentication() {
+    let _guard = lock_server();
+
+    let master = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
+    let master_addr = master.local_addr().unwrap();
+    master.set_nonblocking(true).unwrap();
+
+    let replica_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let replica_port = replica_addr.rsplit(':').next().unwrap().to_string();
+    let replicaof = format!("{} {}", master_addr.ip(), master_addr.port());
+    let _replica = Server::start_on(&replica_addr, &["--replicaof", &replicaof]);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut sock, _) = loop {
+        match master.accept() {
+            Ok(pair) => break pair,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    panic!("replica never connected to the master");
+                }
+                sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        }
+    };
+    sock.set_nonblocking(false).unwrap();
+    sock.set_read_timeout(Some(TIMEOUT)).unwrap();
+
+    assert_master_should_reply(&mut sock, "*1\r\n$4\r\nPING\r\n".to_string());
+    sock.write_all(b"+PONG\r\n").unwrap();
+    assert_master_should_reply(
+        &mut sock,
+        format!(
+            "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n",
+            replica_port.len(), replica_port
+        ),
+    );
+    sock.write_all(b"+OK\r\n").unwrap();
+    assert_master_should_reply(
+        &mut sock,
+        "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".to_string(),
+    );
+    sock.write_all(b"+OK\r\n").unwrap();
+    assert_master_should_reply(
+        &mut sock,
+        "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".to_string(),
+    );
+    sock.write_all(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        .unwrap();
+    let mut rdb = format!("${}\r\n", EMPTY_RDB.len()).into_bytes();
+    rdb.extend_from_slice(EMPTY_RDB);
+    sock.write_all(&rdb).unwrap();
+
+    // this client connected while the default user was still nopass
+    let mut admin = Client::connect_to(&replica_addr);
+    admin
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">secret"])
+        .expect(b"+OK\r\n");
+    // ...so a fresh connection is locked out
+    let mut anon = Client::connect_to(&replica_addr);
+    anon.cmd(&[b"GET", b"k"]).expect(NOAUTH);
+
+    // the replication link is exempt: its write still applies
+    sock.write_all(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let reply = admin.cmd(&[b"GET", b"k"]).take_reply();
+        if reply == b"$1\r\nv\r\n" {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "replica did not apply the propagated SET; last reply {:?}",
+                String::from_utf8_lossy(&reply)
+            );
+        }
+        sleep(Duration::from_millis(20));
+    }
+}

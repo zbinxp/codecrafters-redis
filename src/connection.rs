@@ -1,6 +1,6 @@
 use crate::client::Conn;
 use crate::commands::{blpop, cmd_wait, collect_xread, resolve_ids};
-use crate::dispatch::execute;
+use crate::dispatch::{execute, require_auth};
 use crate::resp::{Decoder, Frame};
 use crate::util;
 use crate::{
@@ -40,11 +40,21 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     pub fn new(reader: ReadHalf<S>, store: Arc<Mutex<Store>>, out_tx: Outbox) -> Self {
+        let mut conn = Conn::new(NEXT_CONN.fetch_add(1, Ordering::Relaxed), out_tx);
+        {
+            // A connection starts as the default user only while that user allows passwordless logins
+            let store = store.lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(def) = store.users.get("default") {
+                if def.enabled && def.nopass {
+                    conn.user = Some("default".into());
+                }
+            }
+        }
         StreamHandler {
             reader,
             decoder: Decoder::new(),
             store,
-            conn: Conn::new(NEXT_CONN.fetch_add(1, Ordering::Relaxed), out_tx),
+            conn,
         }
     }
 
@@ -90,6 +100,8 @@ where
         if self.conn.multi.is_none() && self.conn.subscriptions.is_empty() {
             if let Frame::Array(args) = f {
                 if let Some(cmd) = args.first().and_then(Frame::as_bulk) {
+                    require_auth(cmd, &self.conn)?;
+
                     // async mode command
                     if cmd == b"BLPOP" {
                         return Ok(vec![blpop(args, self.store.clone()).await?]);

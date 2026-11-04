@@ -98,6 +98,9 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
         return Ok(Vec::new()); // *0 / first arg not a bulk string -> silent
     };
 
+    // unauthenticated connections may only AUTH
+    require_auth(name, conn)?;
+
     // Subscribe mode restricts which commands may run and turns PING into a
     // two-element ["pong", msg] array.
     if !conn.subscriptions.is_empty() {
@@ -165,6 +168,14 @@ pub fn execute(req: &Frame, conn: &mut Conn, store: &mut Store) -> CmdResult {
     }
 }
 
+pub fn require_auth(cmd: &[u8], conn: &Conn) -> Result<(), RedisError> {
+    if conn.user.is_some() || conn.from_master || conn.replaying || is_auth_exempt(cmd) {
+        Ok(())
+    } else {
+        Err(RedisError::noauth())
+    }
+}
+
 fn is_transaction_control(name: &[u8]) -> bool {
     [
         b"MULTI".as_slice(),
@@ -194,4 +205,9 @@ fn is_write_command(name: &[u8]) -> bool {
     ]
     .iter()
     .any(|c| name.eq_ignore_ascii_case(c))
+}
+
+fn is_auth_exempt(name: &[u8]) -> bool {
+    [b"AUTH".as_slice(), b"HELLO", b"QUIT", b"RESET"]
+        .iter().any(|c| name.eq_ignore_ascii_case(c))
 }

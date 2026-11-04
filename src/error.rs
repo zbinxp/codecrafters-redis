@@ -122,4 +122,8 @@ impl RedisError {
     pub(crate) fn wrong_pass() -> Self {
         RedisError { message: "WRONGPASS invalid username-password pair or user is disabled.".into() }
     }
+
+    pub(crate) fn noauth() -> Self {
+        RedisError { message: "NOAUTH Authentication required.".into() }
+    }
 }
