@@ -7557,3 +7557,136 @@ fn replication_link_ignores_authentication() {
         sleep(Duration::from_millis(20));
     }
 }
+
+// ---------------------------------------------------------------------------
+// ws7: AUTH persists for the rest of the connection, and NOAUTH covers every
+// implemented command until then.
+// ---------------------------------------------------------------------------
+
+/// The stage's literal example, plus the claim that authentication lasts: the
+/// identity survives ordinary commands, MULTI/EXEC and a blocking command.
+#[test]
+fn ws7_authentication_lasts_for_the_connection() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">newpassword"])
+        .expect(b"+OK\r\n");
+
+    let mut c = t.connect();
+    c.cmd(&[b"PING"]).expect(NOAUTH);
+    c.cmd(&[b"AUTH", b"default", b"newpassword"]).expect(b"+OK\r\n");
+    c.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+
+    // a run of ordinary commands, no re-authentication in sight
+    c.cmd(&[b"SET", b"k", b"v"]).expect(b"+OK\r\n");
+    c.cmd(&[b"GET", b"k"]).expect(b"$1\r\nv\r\n");
+    c.cmd(&[b"INCR", b"n"]).expect(b":1\r\n");
+    c.cmd(&[b"RPUSH", b"l", b"a"]).expect(b":1\r\n");
+    c.cmd(&[b"ZADD", b"z", b"1", b"m"]).expect(b":1\r\n");
+    c.cmd(&[b"XADD", b"s", b"0-1", b"f", b"v"]).expect(b"$3\r\n0-1\r\n");
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$7\r\ndefault\r\n");
+
+    // ...and through transaction state
+    c.cmd(&[b"MULTI"]).expect(b"+OK\r\n");
+    c.cmd(&[b"GET", b"k"]).expect(b"+QUEUED\r\n");
+    c.cmd(&[b"EXEC"]).expect(b"*1\r\n$1\r\nv\r\n");
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$7\r\ndefault\r\n");
+
+    // ...and through a blocking command
+    c.cmd(&[b"BLPOP", b"nolist", b"0.02"]).expect(b"*-1\r\n");
+    c.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+}
+
+/// "All commands except AUTH return NOAUTH" -- one representative of every
+/// implemented family, including the ones dispatched outside `execute`.
+#[test]
+fn noauth_applies_to_every_command() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">p"])
+        .expect(b"+OK\r\n");
+    let mut c = t.connect();
+
+    let cmds: Vec<Vec<&[u8]>> = vec![
+        vec![b"PING"],
+        vec![b"ECHO", b"x"],
+        vec![b"TYPE", b"k"],
+        vec![b"COMMAND"],
+        vec![b"GET", b"k"],
+        vec![b"SET", b"k", b"v"],
+        vec![b"INCR", b"k"],
+        vec![b"PEXPIREAT", b"k", b"1"],
+        vec![b"RPUSH", b"l", b"a"],
+        vec![b"LPUSH", b"l", b"a"],
+        vec![b"LRANGE", b"l", b"0", b"-1"],
+        vec![b"LLEN", b"l"],
+        vec![b"LPOP", b"l"],
+        vec![b"BLPOP", b"l", b"0.01"],
+        vec![b"ZADD", b"z", b"1", b"m"],
+        vec![b"ZRANGE", b"z", b"0", b"-1"],
+        vec![b"ZCARD", b"z"],
+        vec![b"ZSCORE", b"z", b"m"],
+        vec![b"ZRANK", b"z", b"m"],
+        vec![b"ZREM", b"z", b"m"],
+        vec![b"XADD", b"s", b"*", b"f", b"v"],
+        vec![b"XRANGE", b"s", b"-", b"+"],
+        vec![b"XREAD", b"STREAMS", b"s", b"0"],
+        vec![b"XREAD", b"BLOCK", b"10", b"STREAMS", b"s", b"0"],
+        vec![b"SUBSCRIBE", b"ch"],
+        vec![b"UNSUBSCRIBE"],
+        vec![b"PUBLISH", b"ch", b"m"],
+        vec![b"MULTI"],
+        vec![b"EXEC"],
+        vec![b"DISCARD"],
+        vec![b"WATCH", b"k"],
+        vec![b"UNWATCH"],
+        vec![b"INFO"],
+        vec![b"CONFIG", b"GET", b"dir"],
+        vec![b"KEYS", b"*"],
+        vec![b"SETBIT", b"b", b"0", b"1"],
+        vec![b"GETBIT", b"b", b"0"],
+        vec![b"STRLEN", b"b"],
+        vec![b"BITCOUNT", b"b"],
+        vec![b"BITOP", b"AND", b"d", b"b", b"b"],
+        vec![b"GEOADD", b"g", b"1", b"1", b"m"],
+        vec![b"GEOPOS", b"g", b"m"],
+        vec![b"GEODIST", b"g", b"m", b"m"],
+        vec![b"ACL", b"WHOAMI"],
+        vec![b"WAIT", b"0", b"0"],
+        vec![b"REPLCONF", b"ACK", b"0"],
+        vec![b"PSYNC", b"?", b"-1"],
+        vec![b"BGREWRITEAOF"],
+    ];
+    for cmd in cmds {
+        let name = String::from_utf8_lossy(cmd[0]).to_string();
+        let reply = c.cmd(&cmd).take_reply();
+        assert_eq!(
+            reply,
+            NOAUTH.to_vec(),
+            "{name} must be gated, got {:?}",
+            String::from_utf8_lossy(&reply)
+        );
+    }
+    // and AUTH is the one way out
+    c.cmd(&[b"AUTH", b"default", b"p"]).expect(b"+OK\r\n");
+    c.cmd(&[b"PING"]).expect(b"+PONG\r\n");
+}
+
+/// A second AUTH switches identity; the last successful one wins.
+#[test]
+fn auth_can_switch_users_on_a_live_connection() {
+    let mut t = TestCtx::new();
+    t.client
+        .cmd(&[b"ACL", b"SETUSER", b"alice", b"on", b">a"])
+        .expect(b"+OK\r\n")
+        .cmd(&[b"ACL", b"SETUSER", b"default", b">d"])
+        .expect(b"+OK\r\n");
+    let mut c = t.connect();
+    c.cmd(&[b"AUTH", b"default", b"d"]).expect(b"+OK\r\n");
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$7\r\ndefault\r\n");
+    c.cmd(&[b"AUTH", b"alice", b"a"]).expect(b"+OK\r\n");
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$5\r\nalice\r\n");
+    // a failed switch keeps the previous identity
+    c.cmd(&[b"AUTH", b"alice", b"wrong"]).expect(WRONGPASS);
+    c.cmd(&[b"ACL", b"WHOAMI"]).expect(b"$5\r\nalice\r\n");
+}
